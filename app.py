@@ -5,14 +5,34 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 
-import requests
-from requests.adapters import HTTPAdapter, Retry
-from bs4 import BeautifulSoup
+try:
+    import requests
+    from requests.adapters import HTTPAdapter, Retry
+except Exception:  # pragma: no cover - optional dependency
+    requests = None
+    HTTPAdapter = Retry = None
+try:
+    from bs4 import BeautifulSoup
+except Exception:  # pragma: no cover - optional dependency
+    BeautifulSoup = None
 from flask import Flask, request, jsonify, render_template, redirect, url_for
-from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import Column, String, DateTime, Integer, Text, create_engine, UniqueConstraint
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+except Exception:  # pragma: no cover - optional dependency
+    BackgroundScheduler = None
+from sqlalchemy import (
+    Column,
+    String,
+    DateTime,
+    Integer,
+    Text,
+    create_engine,
+    UniqueConstraint,
+    Index,
+)
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import sessionmaker, scoped_session, load_only
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from logging.handlers import RotatingFileHandler
 
 # 데이터베이스 모델 설정
@@ -36,6 +56,8 @@ class Tender(Base):
     
     __table_args__ = (
         UniqueConstraint('site', 'reference_no', name='uix_site_ref'),
+        Index('idx_tenders_site', 'site'),
+        Index('idx_tenders_published_date', 'published_date'),
     )
 
 class SearchConfig(Base):
@@ -76,12 +98,14 @@ setup_logging()
 
 class TenderCrawler:
     def __init__(self):
+        if requests is None:
+            raise RuntimeError("requests library is required for crawling")
         self.session = requests.Session()
         retry_strategy = Retry(
             total=5,
             backoff_factor=0.3,
             status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "POST"]
+            allowed_methods=["GET", "POST"],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
@@ -95,26 +119,24 @@ class TenderCrawler:
     def save_to_db(self, tender_data: Dict[str, Any]) -> bool:
         """입찰 정보를 DB에 저장 (UPSERT)"""
         try:
-            existing = session.query(Tender).filter_by(
-                site=tender_data["site"], 
-                reference_no=tender_data["reference_no"]
-            ).first()
-            
-            if existing:
-                # 기존 레코드 업데이트
-                for key, value in tender_data.items():
-                    if key != "site" and key != "reference_no":
-                        setattr(existing, key, value)
-                existing.last_updated = datetime.utcnow()
-                app.logger.info(f"Updated tender: {tender_data['site']} - {tender_data['reference_no']}")
-            else:
-                # 신규 레코드 생성
-                tender_data['last_updated'] = datetime.utcnow()
-                tender = Tender(**tender_data)
-                session.add(tender)
-                app.logger.info(f"Added new tender: {tender_data['site']} - {tender_data['reference_no']}")
-            
+            data = dict(tender_data)
+            data["last_updated"] = datetime.utcnow()
+
+            stmt = sqlite_insert(Tender).values(**data)
+            update_cols = {
+                c: stmt.excluded[c]
+                for c in data.keys()
+                if c not in {"site", "reference_no"}
+            }
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["site", "reference_no"],
+                set_=update_cols,
+            )
+            session.execute(stmt)
             session.commit()
+            app.logger.info(
+                f"Upserted tender: {data['site']} - {data['reference_no']}"
+            )
             return True
         except Exception as e:
             session.rollback()
@@ -317,8 +339,9 @@ def crawl_all():
     app.logger.info(f"Crawling job completed in {duration:.2f}s - UNGM: {ungm_count}, TED: {ted_count}")
 
 # 스케줄러 설정
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=crawl_all, trigger='cron', hour=2, minute=0, id='daily_crawl')
+scheduler = BackgroundScheduler() if BackgroundScheduler else None
+if scheduler:
+    scheduler.add_job(func=crawl_all, trigger='cron', hour=2, minute=0, id='daily_crawl')
 
 # REST API 엔드포인트
 @app.route('/api/tenders', methods=['GET'])
@@ -330,25 +353,43 @@ def get_tenders():
     limit = int(request.args.get('limit', 100))
     
     query = session.query(Tender)
-    
+
     if site:
         query = query.filter_by(site=site.upper())
-    
+
     if since:
         try:
             dt = datetime.fromisoformat(since)
             query = query.filter(Tender.published_date >= dt)
         except:
             pass
-    
-    tenders = query.order_by(Tender.published_date.desc()).limit(limit).all()
-    
-    result = []
-    for t in tenders:
-        if keyword and keyword.lower() not in (t.title or "").lower():
-            continue
-            
-        result.append({
+
+    if keyword:
+        query = query.filter(Tender.title.ilike(f"%{keyword}%"))
+
+    total = query.count()
+    fields = (
+        Tender.site,
+        Tender.reference_no,
+        Tender.title,
+        Tender.description,
+        Tender.published_date,
+        Tender.deadline_date,
+        Tender.organization,
+        Tender.notice_type,
+        Tender.country,
+        Tender.detail_url,
+        Tender.last_updated,
+    )
+    tenders = (
+        query.options(load_only(*fields))
+        .order_by(Tender.published_date.desc())
+        .limit(limit)
+        .all()
+    )
+
+    result = [
+        {
             "site": t.site,
             "reference_no": t.reference_no,
             "title": t.title,
@@ -359,13 +400,12 @@ def get_tenders():
             "notice_type": t.notice_type,
             "country": t.country,
             "detail_url": t.detail_url,
-            "last_updated": t.last_updated.isoformat() if t.last_updated else None
-        })
-    
-    return jsonify({
-        "total": len(result),
-        "tenders": result
-    })
+            "last_updated": t.last_updated.isoformat() if t.last_updated else None,
+        }
+        for t in tenders
+    ]
+
+    return jsonify({"total": total, "tenders": result})
 
 @app.route('/api/crawl', methods=['POST'])
 def manual_crawl():
@@ -454,9 +494,11 @@ def view_logs():
 
 if __name__ == '__main__':
     try:
-        scheduler.start()
+        if scheduler:
+            scheduler.start()
         app.logger.info("MCP Tender Server started")
         app.run(debug=True, host='0.0.0.0', port=5000)
     except KeyboardInterrupt:
-        scheduler.shutdown()
+        if scheduler:
+            scheduler.shutdown()
         app.logger.info("MCP Tender Server stopped")
