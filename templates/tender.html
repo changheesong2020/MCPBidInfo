@@ -1,0 +1,113 @@
+
+
+<!-- templates/tenders.html -->
+{% extends "base.html" %}
+
+{% block title %}입찰 목록 - MCP 입찰 정보 수집 서버{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>수집된 입찰 공고 목록</h2>
+    
+    <div class="filter-bar">
+        <form method="GET" style="display: flex; gap: 1rem; align-items: center;">
+            <div>
+                <label for="site">사이트:</label>
+                <select name="site" id="site">
+                    <option value="">전체</option>
+                    <option value="UNGM" {% if site_filter == 'UNGM' %}selected{% endif %}>UNGM</option>
+                    <option value="TED" {% if site_filter == 'TED' %}selected{% endif %}>TED</option>
+                </select>
+            </div>
+            <button type="submit" class="btn">필터 적용</button>
+        </form>
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <strong>총 {{ total }}개의 공고</strong> (페이지 {{ page }})
+    </div>
+    
+    <table>
+        <thead>
+            <tr>
+                <th>사이트</th>
+                <th>공고 제목</th>
+                <th>발주기관</th>
+                <th>국가</th>
+                <th>게시일</th>
+                <th>마감일</th>
+                <th>공고유형</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for tender in tenders %}
+            <tr>
+                <td>
+                    <span style="background: {% if tender.site == 'UNGM' %}#3498db{% else %}#e74c3c{% endif %}; 
+                                 color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em;">
+                        {{ tender.site }}
+                    </span>
+                </td>
+                <td>
+                    {% if tender.detail_url %}
+                        <a href="{{ tender.detail_url }}" target="_blank" style="color: #3498db; text-decoration: none;">
+                            {{ tender.title[:100] }}{% if tender.title|length > 100 %}...{% endif %}
+                        </a>
+                    {% else %}
+                        {{ tender.title[:100] }}{% if tender.title|length > 100 %}...{% endif %}
+                    {% endif %}
+                </td>
+                <td>{{ tender.organization[:50] if tender.organization else '-' }}</td>
+                <td>{{ tender.country if tender.country else '-' }}</td>
+                <td>
+                    {% if tender.published_date %}
+                        {{ tender.published_date.strftime('%Y-%m-%d') }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if tender.deadline_date %}
+                        {{ tender.deadline_date.strftime('%Y-%m-%d') }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td>{{ tender.notice_type[:30] if tender.notice_type else '-' }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="7" style="text-align: center; color: #666;">저장된 공고가 없습니다.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    
+    <!-- 페이지네이션 -->
+    {% if total > per_page %}
+    <div class="pagination">
+        {% set total_pages = (total + per_page - 1) // per_page %}
+        
+        {% if page > 1 %}
+            <a href="?page={{ page - 1 }}{% if site_filter %}&site={{ site_filter }}{% endif %}">&laquo; 이전</a>
+        {% endif %}
+        
+        {% for p in range(1, total_pages + 1) %}
+            {% if p == page %}
+                <span class="current">{{ p }}</span>
+            {% elif p <= 3 or p > total_pages - 3 or (p >= page - 2 and p <= page + 2) %}
+                <a href="?page={{ p }}{% if site_filter %}&site={{ site_filter }}{% endif %}">{{ p }}</a>
+            {% elif p == 4 and page > 6 %}
+                <span>...</span>
+            {% elif p == total_pages - 3 and page < total_pages - 5 %}
+                <span>...</span>
+            {% endif %}
+        {% endfor %}
+        
+        {% if page < total_pages %}
+            <a href="?page={{ page + 1 }}{% if site_filter %}&site={{ site_filter }}{% endif %}">다음 &raquo;</a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

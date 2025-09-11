@@ -1,0 +1,57 @@
+
+
+<!-- templates/search_config.html -->
+{% extends "base.html" %}
+
+{% block title %}검색 설정 - MCP 입찰 정보 수집 서버{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>검색 설정 관리</h2>
+    <p>UNGM과 TED 사이트에서 입찰 공고를 검색할 때 사용할 키워드와 검색식을 설정합니다.</p>
+    
+    <form method="POST">
+        <div class="form-group">
+            <label for="ungm_keywords">UNGM 검색 키워드</label>
+            <input type="text" 
+                   id="ungm_keywords" 
+                   name="ungm_keywords" 
+                   value="{{ ungm_keywords }}"
+                   placeholder="예: solar,wind,renewable,energy">
+            <small>쉼표(,)로 구분하여 여러 키워드를 입력하세요. 제목에 해당 키워드가 포함된 공고만 수집됩니다.</small>
+        </div>
+        
+        <div class="form-group">
+            <label for="ted_query">TED 전문 검색식</label>
+            <input type="text" 
+                   id="ted_query" 
+                   name="ted_query" 
+                   value="{{ ted_query }}"
+                   placeholder="예: FT=(solar OR wind OR renewable OR energy)">
+            <small>TED Expert Query 문법을 사용합니다. FT=(키워드1 OR 키워드2) 형식으로 입력하세요.</small>
+        </div>
+        
+        <button type="submit" class="btn">설정 저장</button>
+    </form>
+    
+    <div style="margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #eee;">
+        <h3>검색 문법 도움말</h3>
+        <div style="background: #f8f9fa; padding: 1rem; border-radius: 4px;">
+            <h4>UNGM 키워드</h4>
+            <ul>
+                <li>쉼표로 구분된 키워드들은 OR 조건으로 검색됩니다</li>
+                <li>예: "solar,wind,renewable" → 제목에 solar, wind, renewable 중 하나라도 포함된 공고</li>
+                <li>빈 값으로 두면 모든 공고를 수집합니다</li>
+            </ul>
+            
+            <h4>TED 전문 검색식</h4>
+            <ul>
+                <li>FT=(키워드1 OR 키워드2): 전체 텍스트에서 키워드 검색</li>
+                <li>AND, OR, NOT 연산자 사용 가능 (대문자)</li>
+                <li>괄호로 그룹핑 가능</li>
+                <li>예: FT=(solar OR wind) AND NOT nuclear</li>
+            </ul>
+        </div>
+    </div>
+</div>
+{% endblock %}

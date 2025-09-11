@@ -1,0 +1,35 @@
+
+
+<!-- templates/logs.html -->
+{% extends "base.html" %}
+
+{% block title %}로그 - MCP 입찰 정보 수집 서버{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>시스템 로그</h2>
+    <p>최근 100줄의 로그를 표시합니다.</p>
+    
+    <div style="background: #2c3e50; color: #ecf0f1; padding: 1rem; border-radius: 4px; 
+                font-family: 'Courier New', monospace; font-size: 0.9em; 
+                max-height: 600px; overflow-y: auto;">
+        {% if logs %}
+            {% for log in logs %}
+                <div style="margin-bottom: 2px; 
+                           {% if 'ERROR' in log %}color: #e74c3c;
+                           {% elif 'WARNING' in log %}color: #f39c12;
+                           {% elif 'INFO' in log %}color: #2ecc71;
+                           {% endif %}">
+                    {{ log.strip() }}
+                </div>
+            {% endfor %}
+        {% else %}
+            <div style="color: #95a5a6;">로그 파일을 읽을 수 없습니다.</div>
+        {% endif %}
+    </div>
+    
+    <div style="margin-top: 1rem;">
+        <button onclick="location.reload()" class="btn">새로고침</button>
+    </div>
+</div>
+{% endblock %}
