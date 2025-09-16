@@ -304,35 +304,39 @@ class TenderCrawler:
             }
         )
 
-    def _extract_ungm_token(self, response: "requests.Response") -> Optional[str]:
-        token: Optional[str] = None
+    def _extract_ungm_tokens(
+        self, response: "requests.Response"
+    ) -> Tuple[Optional[str], Optional[str]]:
+        form_token: Optional[str] = None
+        cookie_token: Optional[str] = None
 
         if BeautifulSoup is not None:
             try:
                 soup = BeautifulSoup(response.text, "html.parser")
                 token_input = soup.select_one("input[name='__RequestVerificationToken']")
                 if token_input and token_input.get("value"):
-                    token = token_input.get("value")
+                    form_token = token_input.get("value")
             except Exception as parse_error:
                 app.logger.debug(
                     "Failed to parse UNGM verification token via BeautifulSoup",
                     exc_info=parse_error,
                 )
 
-        if not token:
-            token = response.cookies.get("__RequestVerificationToken")
+        if not cookie_token:
+            cookie_token = response.cookies.get("__RequestVerificationToken")
 
-        if not token:
-            token = self.session.cookies.get("__RequestVerificationToken")
+        if not cookie_token:
+            cookie_token = self.session.cookies.get("__RequestVerificationToken")
 
-        if not token:
+        if not cookie_token:
             for cookie in self.session.cookies:
                 if cookie.name.startswith("__RequestVerificationToken") and cookie.value:
-                    token = cookie.value
+                    cookie_token = cookie.value
                     break
 
-        if not token:
-            text = getattr(response, "text", "") or ""
+        text = getattr(response, "text", "") or ""
+
+        if not form_token:
             for pattern in (
                 r"name=\"__RequestVerificationToken\"[^>]*value=\"([^\"]+)\"",
                 r"__RequestVerificationToken\"\s*:\s*\"([^\"]+)\"",
@@ -340,10 +344,23 @@ class TenderCrawler:
             ):
                 match = re.search(pattern, text)
                 if match and match.group(1):
-                    token = match.group(1)
+                    form_token = match.group(1)
                     break
 
-        return token
+        if not cookie_token:
+            match = re.search(
+                r"RequestVerificationToken['\"]\s*:\s*['\"]([^'\"]+)['\"]",
+                text,
+            )
+            if match:
+                combined = match.group(1)
+                if ":" in combined:
+                    cookie_token, request_token = combined.split(":", 1)
+                    form_token = form_token or request_token
+                elif not form_token:
+                    form_token = combined
+
+        return form_token, cookie_token
 
     def get_search_config(self, site: str) -> str:
         """검색 설정 조회"""
@@ -404,7 +421,7 @@ class TenderCrawler:
         url = 'https://www.ungm.org/Public/Notice/Search'
         referer_url = 'https://www.ungm.org/Public/Notice'
         payload = {
-            "PageIndex": 0,
+            "PageIndex": 1,
             "PageSize": 100,
             "Title": "",
             "Description": "",
@@ -435,11 +452,20 @@ class TenderCrawler:
         try:
             verification_token: Optional[str] = None
 
+            verification_token: Optional[str] = None
+            verification_cookie: Optional[str] = None
+
             for bootstrap_url in (referer_url, url):
                 bootstrap_response = self.session.get(bootstrap_url, timeout=30)
                 bootstrap_response.raise_for_status()
-                verification_token = self._extract_ungm_token(bootstrap_response)
-                if verification_token:
+                form_token, cookie_token = self._extract_ungm_tokens(
+                    bootstrap_response
+                )
+                if form_token and not verification_token:
+                    verification_token = form_token
+                if cookie_token and not verification_cookie:
+                    verification_cookie = cookie_token
+                if verification_token and verification_cookie:
                     break
 
             if not verification_token:
@@ -452,8 +478,15 @@ class TenderCrawler:
                 "Referer": referer_url,
                 "X-Requested-With": "XMLHttpRequest",
                 "Origin": "https://www.ungm.org",
-                "RequestVerificationToken": verification_token,
+                "Accept": "text/html, */*; q=0.01",
+                "Content-Type": "application/json; charset=UTF-8",
             }
+            if verification_cookie:
+                request_headers["RequestVerificationToken"] = (
+                    f"{verification_cookie}:{verification_token}"
+                )
+            else:
+                request_headers["RequestVerificationToken"] = verification_token
             request_payload = dict(payload)
             request_payload["__RequestVerificationToken"] = verification_token
 
