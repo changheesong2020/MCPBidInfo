@@ -1,168 +1,109 @@
-
-
-<!-- templates/search_config.html -->
-{% extends "base.html" %}
-
-{% block title %}검색 설정 - MCP 입찰 정보 수집 서버{% endblock %}
-
-{% block content %}
-<style>
-    .form-section {
-        margin-bottom: 2rem;
-        padding-bottom: 1.5rem;
-        border-bottom: 1px solid #eee;
-    }
-    .form-section:last-of-type {
-        border-bottom: none;
-        padding-bottom: 0;
-    }
-    .form-section h3 {
-        margin-top: 0;
-    }
-    .form-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 1rem;
-    }
-    .form-grid .form-group {
-        margin-bottom: 0;
-    }
-    textarea[readonly] {
-        background-color: #f4f6f8;
-        color: #4a5568;
-    }
-    .preview-field {
-        background: #f8f9fa;
-        border: 1px dashed #d0d7de;
-        padding: 0.75rem;
-        border-radius: 4px;
-        font-size: 0.9rem;
-        word-break: break-all;
-    }
-</style>
-
-<div class="card">
-    <h2>검색 설정 관리</h2>
-    <p>ted_ungm_search 도구의 검색 빌더를 활용하여 UNGM 키워드와 TED 고급 검색 조건을 설정할 수 있습니다.</p>
-
-    <form method="POST">
-        <div class="form-section">
-            <h3>UNGM 검색 조건</h3>
-            <div class="form-group">
-                <label for="ungm_keywords">UNGM 검색 키워드</label>
-                <input type="text"
-                       id="ungm_keywords"
-                       name="ungm_keywords"
-                       value="{{ ungm_keywords }}"
-                       placeholder="예: solar,wind,renewable,energy">
-                <small>쉼표 또는 줄바꿈으로 여러 키워드를 입력하세요. 제목에 해당 키워드가 포함된 공고만 수집됩니다.</small>
-            </div>
-            <div class="form-group">
-                <label>UNGM 미리보기 링크</label>
-                <div class="preview-field">
-                    <a href="{{ ungm_preview_link }}" target="_blank" rel="noopener">{{ ungm_preview_link }}</a>
-                </div>
-                <small>ted_ungm_search의 <code>build_ungm_deeplink</code> 유틸리티를 이용해 즉시 검색해볼 수 있는 URL입니다.</small>
-            </div>
-        </div>
-
-        <div class="form-section">
-            <h3>TED 검색 빌더</h3>
-            <p style="margin-top: -0.5rem; color: #555;">날짜 범위와 국가, CPV, 키워드 등을 입력하면 ted_ungm_search의 <code>build_query</code> 로직을 통해 검색식이 자동 생성됩니다.</p>
-
-            <div class="form-grid">
-                <div class="form-group">
-                    <label for="ted_date_from">발행일 (시작)</label>
-                    <input type="date" id="ted_date_from" name="ted_date_from" value="{{ ted_date_from }}">
-                </div>
-                <div class="form-group">
-                    <label for="ted_date_to">발행일 (종료)</label>
-                    <input type="date" id="ted_date_to" name="ted_date_to" value="{{ ted_date_to }}">
-                </div>
-                <div class="form-group">
-                    <label for="ted_limit">페이지 크기 (limit)</label>
-                    <input type="number" id="ted_limit" name="ted_limit" value="{{ ted_limit }}" min="1" max="250">
-                </div>
-                <div class="form-group">
-                    <label for="ted_page">시작 페이지</label>
-                    <input type="number" id="ted_page" name="ted_page" value="{{ ted_page }}" min="1">
-                </div>
-            </div>
-
-            <div class="form-grid" style="margin-top: 1rem;">
-                <div class="form-group">
-                    <label for="ted_countries">국가 (ISO 2자리)</label>
-                    <input type="text" id="ted_countries" name="ted_countries" value="{{ ted_countries }}" placeholder="예: DE,FR,IT">
-                    <small>쉼표 또는 줄바꿈으로 여러 국가를 입력하세요. place-of-performance와 buyer-country 필터가 결합됩니다.</small>
-                </div>
-                <div class="form-group">
-                    <label for="ted_cpv">CPV 코드 접두어</label>
-                    <input type="text" id="ted_cpv" name="ted_cpv" value="{{ ted_cpv }}" placeholder="예: 33*,0931*">
-                    <small>와일드카드(*)를 포함할 수 있습니다.</small>
-                </div>
-            </div>
-
-            <div class="form-grid" style="margin-top: 1rem;">
-                <div class="form-group">
-                    <label for="ted_keywords">제목 키워드</label>
-                    <input type="text" id="ted_keywords" name="ted_keywords" value="{{ ted_keywords }}" placeholder="예: solar,wind">
-                    <small>문구 검색은 공백을 포함한 단어를 그대로 입력하세요. 쉼표 또는 줄바꿈으로 여러 키워드를 구분합니다.</small>
-                </div>
-                <div class="form-group">
-                    <label for="ted_form_types">eForms Form Type</label>
-                    <input type="text" id="ted_form_types" name="ted_form_types" value="{{ ted_form_types }}" placeholder="예: F15,F03">
-                    <small>필요한 경우에만 입력하세요.</small>
-                </div>
-            </div>
-
-            <div class="form-group" style="margin-top: 1rem;">
-                <label for="ted_fields">반환 필드 목록</label>
-                <textarea id="ted_fields" name="ted_fields" rows="3" placeholder="필드를 쉼표 또는 줄바꿈으로 구분합니다.">{{ ted_fields_text }}</textarea>
-                <small>값을 비워두면 권장 기본 필드가 사용됩니다: {{ ted_default_fields | join(', ') }}.</small>
-            </div>
-
-            <div class="form-grid" style="margin-top: 1rem;">
-                <div class="form-group">
-                    <label for="ted_sort_field">정렬 필드</label>
-                    <input type="text" id="ted_sort_field" name="ted_sort_field" value="{{ ted_sort_field }}">
-                </div>
-                <div class="form-group">
-                    <label for="ted_sort_order">정렬 방향</label>
-                    <select id="ted_sort_order" name="ted_sort_order">
-                        <option value="DESC" {% if ted_sort_order == 'DESC' %}selected{% endif %}>DESC</option>
-                        <option value="ASC" {% if ted_sort_order == 'ASC' %}selected{% endif %}>ASC</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="ted_mode">조회 모드</label>
-                    <select id="ted_mode" name="ted_mode">
-                        <option value="page" {% if ted_mode == 'page' %}selected{% endif %}>페이지 모드</option>
-                        <option value="iteration" {% if ted_mode == 'iteration' %}selected{% endif %}>Iteration 모드</option>
-                    </select>
-                    <small>현재 서버 크롤러는 페이지 모드를 사용하지만 설정값은 그대로 저장됩니다.</small>
-                </div>
-            </div>
-
-            <div class="form-group" style="margin-top: 1.5rem;">
-                <label>생성된 TED 검색식</label>
-                <textarea readonly rows="3">{{ ted_query_preview }}</textarea>
-                <small>위 입력값을 기반으로 <code>ted_ungm_search.ted_client.build_query</code>가 생성한 검색식입니다.</small>
-            </div>
-        </div>
-
-        <button type="submit" class="btn">설정 저장</button>
-    </form>
-
-    <div style="margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #eee;">
-        <h3>도움말</h3>
-        <div style="background: #f8f9fa; padding: 1rem; border-radius: 4px;">
-            <ul>
-                <li>발행일 범위는 반드시 지정해야 하며, 기본값은 최근 30일입니다.</li>
-                <li>국가, CPV, 키워드, Form Type은 선택 사항이며 입력하지 않으면 해당 필터가 적용되지 않습니다.</li>
-                <li>필드 목록을 비우면 ted_ungm_search 기본 필드({{ ted_default_fields | join(', ') }})가 사용됩니다.</li>
-                <li>설정 저장 후 수동 크롤링을 실행하면 새로운 검색식과 필드 구성이 즉시 적용됩니다.</li>
-            </ul>
-        </div>
-    </div>
-</div>
-{% endblock %}
+diff --git a/templates/search_config.html b/templates/search_config.html
+index c88edc6eb5defaa11d0246dd174b549d1d9cc185..53278e0a82c9b926c298025ea917fe699899d879 100644
+--- a/templates/search_config.html
++++ b/templates/search_config.html
+@@ -32,102 +32,102 @@
+         color: #4a5568;
+     }
+     .preview-field {
+         background: #f8f9fa;
+         border: 1px dashed #d0d7de;
+         padding: 0.75rem;
+         border-radius: 4px;
+         font-size: 0.9rem;
+         word-break: break-all;
+     }
+ </style>
+ 
+ <div class="card">
+     <h2>검색 설정 관리</h2>
+     <p>ted_ungm_search 도구의 검색 빌더를 활용하여 UNGM 키워드와 TED 고급 검색 조건을 설정할 수 있습니다.</p>
+ 
+     <form method="POST">
+         <div class="form-section">
+             <h3>UNGM 검색 조건</h3>
+             <div class="form-group">
+                 <label for="ungm_keywords">UNGM 검색 키워드</label>
+                 <input type="text"
+                        id="ungm_keywords"
+                        name="ungm_keywords"
+                        value="{{ ungm_keywords }}"
+-                       placeholder="예: solar,wind,renewable,energy">
++                       placeholder="예: PCR,reagent,diagnostic">
+                 <small>쉼표 또는 줄바꿈으로 여러 키워드를 입력하세요. 제목에 해당 키워드가 포함된 공고만 수집됩니다.</small>
+             </div>
+             <div class="form-group">
+                 <label>UNGM 미리보기 링크</label>
+                 <div class="preview-field">
+                     <a href="{{ ungm_preview_link }}" target="_blank" rel="noopener">{{ ungm_preview_link }}</a>
+                 </div>
+                 <small>ted_ungm_search의 <code>build_ungm_deeplink</code> 유틸리티를 이용해 즉시 검색해볼 수 있는 URL입니다.</small>
+             </div>
+         </div>
+ 
+         <div class="form-section">
+             <h3>TED 검색 빌더</h3>
+             <p style="margin-top: -0.5rem; color: #555;">날짜 범위와 국가, CPV, 키워드 등을 입력하면 ted_ungm_search의 <code>build_query</code> 로직을 통해 검색식이 자동 생성됩니다.</p>
+ 
+             <div class="form-grid">
+                 <div class="form-group">
+                     <label for="ted_date_from">발행일 (시작)</label>
+                     <input type="date" id="ted_date_from" name="ted_date_from" value="{{ ted_date_from }}">
+                 </div>
+                 <div class="form-group">
+                     <label for="ted_date_to">발행일 (종료)</label>
+                     <input type="date" id="ted_date_to" name="ted_date_to" value="{{ ted_date_to }}">
+                 </div>
+                 <div class="form-group">
+                     <label for="ted_limit">페이지 크기 (limit)</label>
+                     <input type="number" id="ted_limit" name="ted_limit" value="{{ ted_limit }}" min="1" max="250">
+                 </div>
+                 <div class="form-group">
+                     <label for="ted_page">시작 페이지</label>
+                     <input type="number" id="ted_page" name="ted_page" value="{{ ted_page }}" min="1">
+                 </div>
+             </div>
+ 
+             <div class="form-grid" style="margin-top: 1rem;">
+                 <div class="form-group">
+                     <label for="ted_countries">국가 (ISO 2자리)</label>
+                     <input type="text" id="ted_countries" name="ted_countries" value="{{ ted_countries }}" placeholder="예: DE,FR,IT">
+                     <small>쉼표 또는 줄바꿈으로 여러 국가를 입력하세요. place-of-performance와 buyer-country 필터가 결합됩니다.</small>
+                 </div>
+                 <div class="form-group">
+                     <label for="ted_cpv">CPV 코드 접두어</label>
+                     <input type="text" id="ted_cpv" name="ted_cpv" value="{{ ted_cpv }}" placeholder="예: 33*,0931*">
+                     <small>와일드카드(*)를 포함할 수 있습니다.</small>
+                 </div>
+             </div>
+ 
+             <div class="form-grid" style="margin-top: 1rem;">
+                 <div class="form-group">
+                     <label for="ted_keywords">제목 키워드</label>
+-                    <input type="text" id="ted_keywords" name="ted_keywords" value="{{ ted_keywords }}" placeholder="예: solar,wind">
++                    <input type="text" id="ted_keywords" name="ted_keywords" value="{{ ted_keywords }}" placeholder="예: PCR,reagent,diagnostic">
+                     <small>문구 검색은 공백을 포함한 단어를 그대로 입력하세요. 쉼표 또는 줄바꿈으로 여러 키워드를 구분합니다.</small>
+                 </div>
+                 <div class="form-group">
+                     <label for="ted_form_types">eForms Form Type</label>
+                     <input type="text" id="ted_form_types" name="ted_form_types" value="{{ ted_form_types }}" placeholder="예: F15,F03">
+                     <small>필요한 경우에만 입력하세요.</small>
+                 </div>
+             </div>
+ 
+             <div class="form-group" style="margin-top: 1rem;">
+                 <label for="ted_fields">반환 필드 목록</label>
+                 <textarea id="ted_fields" name="ted_fields" rows="3" placeholder="필드를 쉼표 또는 줄바꿈으로 구분합니다.">{{ ted_fields_text }}</textarea>
+                 <small>값을 비워두면 권장 기본 필드가 사용됩니다: {{ ted_default_fields | join(', ') }}.</small>
+             </div>
+ 
+             <div class="form-grid" style="margin-top: 1rem;">
+                 <div class="form-group">
+                     <label for="ted_sort_field">정렬 필드</label>
+                     <input type="text" id="ted_sort_field" name="ted_sort_field" value="{{ ted_sort_field }}">
+                 </div>
+                 <div class="form-group">
+                     <label for="ted_sort_order">정렬 방향</label>
+                     <select id="ted_sort_order" name="ted_sort_order">
+                         <option value="DESC" {% if ted_sort_order == 'DESC' %}selected{% endif %}>DESC</option>
+                         <option value="ASC" {% if ted_sort_order == 'ASC' %}selected{% endif %}>ASC</option>
