@@ -17,16 +17,19 @@
                     <option value="">전체</option>
                     <option value="UNGM" {% if site_filter == 'UNGM' %}selected{% endif %}>UNGM</option>
                     <option value="TED" {% if site_filter == 'TED' %}selected{% endif %}>TED</option>
+                    <option value="SAM" {% if site_filter == 'SAM' %}selected{% endif %}>SAM.gov</option>
                 </select>
             </div>
             <button type="submit" class="btn">필터 적용</button>
         </form>
     </div>
-    
+
     <div style="margin-bottom: 1rem;">
         <strong>총 {{ total }}개의 공고</strong> (페이지 {{ page }})
     </div>
-    
+
+    {% set site_colors = {'UNGM': '#3498db', 'TED': '#e74c3c', 'SAM': '#2ecc71'} %}
+
     <table>
         <thead>
             <tr>
@@ -43,7 +46,7 @@
             {% for tender in tenders %}
             <tr>
                 <td>
-                    <span style="background: {% if tender.site == 'UNGM' %}#3498db{% else %}#e74c3c{% endif %}; 
+                    <span style="background: {{ site_colors.get(tender.site, '#7f8c8d') }};
                                  color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em;">
                         {{ tender.site }}
                     </span>
