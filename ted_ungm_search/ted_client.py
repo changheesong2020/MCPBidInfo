@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime
-from typing import Dict, Iterator, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 import requests
 from ._tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -153,7 +153,7 @@ def _normalise_fields(fields: Optional[Sequence[str]]) -> List[str]:
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_exception_type((requests.RequestException, TedTransientError)),
 )
-def _perform_request(payload: Dict[str, Union[str, int]]) -> dict:
+def _perform_request(payload: Dict[str, Any]) -> dict:
     logger.debug("Performing TED request", extra={"payload": payload})
     response = _session.post(API_URL, json=payload, timeout=REQUEST_TIMEOUT)
     if response.status_code in {429} or 500 <= response.status_code < 600:
@@ -181,7 +181,7 @@ def _safe_json(response: requests.Response) -> Optional[dict]:
 
 
 def _request_with_iteration_token(
-    params: Dict[str, Union[str, int]], iteration_token: Optional[str] = None
+    params: Dict[str, Any], iteration_token: Optional[str] = None
 ) -> dict:
     if not iteration_token:
         return _perform_request(params)
@@ -215,9 +215,9 @@ def search_once(
     """Execute a single TED search request."""
 
     selected_fields = _normalise_fields(fields)
-    params: Dict[str, Union[str, int]] = {
+    params: Dict[str, Any] = {
         "q": q,
-        "fields": ",".join(selected_fields),
+        "fields": selected_fields,
         "limit": limit,
         "sort": sort_field,
         "order": sort_order,
