@@ -218,6 +218,16 @@ class TenderCrawler:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
     
     def get_search_config(self, site: str) -> str:
         """검색 설정 조회"""
@@ -260,12 +270,19 @@ class TenderCrawler:
     def crawl_ungm(self) -> int:
         """UNGM 사이트 크롤링"""
         app.logger.info("Starting UNGM crawling...")
-        
+
+        if BeautifulSoup is None:
+            app.logger.error(
+                "UNGM crawling failed: BeautifulSoup is required but not installed"
+            )
+            return 0
+
         # 날짜 설정 (어제부터 오늘까지)
         today = datetime.utcnow().strftime("%d-%b-%Y")
         yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%d-%b-%Y")
-        
+
         url = 'https://www.ungm.org/Public/Notice/Search'
+        referer_url = 'https://www.ungm.org/Public/Notice'
         payload = {
             "PageIndex": 0,
             "PageSize": 100,
@@ -285,19 +302,57 @@ class TenderCrawler:
             "NoticeSearchTotalLabelId": "noticeSearchTotal",
             "TypeOfCompetitions": []
         }
-        
+
         try:
-            response = self.session.post(url, json=payload, timeout=30)
+            bootstrap_response = self.session.get(referer_url, timeout=30)
+            bootstrap_response.raise_for_status()
+
+            verification_token = None
+            try:
+                soup = BeautifulSoup(bootstrap_response.text, 'html.parser')
+                token_input = soup.select_one("input[name='__RequestVerificationToken']")
+                if token_input:
+                    verification_token = token_input.get("value")
+            except Exception as parse_error:
+                app.logger.debug(
+                    "Failed to parse UNGM verification token", exc_info=parse_error
+                )
+
+            if not verification_token:
+                verification_token = bootstrap_response.cookies.get(
+                    "__RequestVerificationToken"
+                )
+
+            if not verification_token:
+                app.logger.error(
+                    "UNGM crawling failed: unable to locate verification token"
+                )
+                return 0
+
+            request_headers = {
+                "Referer": referer_url,
+                "X-Requested-With": "XMLHttpRequest",
+                "RequestVerificationToken": verification_token,
+            }
+            request_payload = dict(payload)
+            request_payload["__RequestVerificationToken"] = verification_token
+
+            response = self.session.post(
+                url,
+                json=request_payload,
+                headers=request_headers,
+                timeout=30,
+            )
             response.raise_for_status()
-            
+
             # BeautifulSoup으로 파싱 (html5lib 파서 사용)
             soup = BeautifulSoup(response.content, 'html5lib')
             rows = soup.select('.tableRow')
-            
+
             count = 0
-            keywords = self.get_search_config('UNGM').split(',') if self.get_search_config('UNGM') else []
-            keywords = [k.strip().lower() for k in keywords if k.strip()]
-            
+            config_raw = self.get_search_config('UNGM')
+            keywords = [token.lower() for token in _split_tokens(config_raw)] if config_raw else []
+
             for row in rows:
                 cells = [cell.get_text(strip=True) for cell in row.select('.tableCell')]
                 if len(cells) < 8:
@@ -349,20 +404,29 @@ class TenderCrawler:
                 
                 if self.save_to_db(tender_data):
                     count += 1
-            
+
             app.logger.info(f"UNGM crawling completed: {count} tenders processed")
             return count
-            
-        except Exception as e:
-            app.logger.error(f"UNGM crawling failed: {e}")
+
+        except requests.HTTPError as exc:
+            detail = ""
+            if exc.response is not None:
+                detail = f" - {exc.response.text[:200]}"
+            app.logger.error(f"UNGM crawling failed: {exc}{detail}")
             return 0
-    
+        except requests.RequestException as exc:
+            app.logger.error(f"UNGM crawling failed: {exc}")
+            return 0
+        except Exception as exc:
+            app.logger.error(f"UNGM crawling failed: {exc}")
+            return 0
+
     def crawl_ted(self) -> int:
         """TED 사이트 크롤링"""
         app.logger.info("Starting TED crawling...")
-        
+
         url = "https://api.ted.europa.eu/v3/notices/search"
-        
+
         ted_settings = self.get_ted_settings()
         search_query = ted_settings.get("query") or DEFAULT_TED_QUERY
         fields = ted_settings.get("fields") or list(DEFAULT_TED_FIELDS)
@@ -387,14 +451,17 @@ class TenderCrawler:
         except (TypeError, ValueError):
             page_value = 1
 
-        sort_order_value = str(sort_order).upper() if sort_order else "DESC"
+        sort_order_value = str(sort_order).lower() if sort_order else "desc"
 
-        payload = {
-            "query": search_query,
-            "fields": fields,
+        field_tokens = [str(field).strip() for field in fields if str(field).strip()]
+        if not field_tokens:
+            field_tokens = list(DEFAULT_TED_FIELDS)
+
+        params = {
+            "q": search_query,
+            "fields": ",".join(field_tokens),
             "limit": limit_value,
-            "scope": "ACTIVE",
-            "sortBy": sort_field,
+            "sort": sort_field,
             "order": sort_order_value,
             "page": page_value,
         }
@@ -402,32 +469,65 @@ class TenderCrawler:
         app.logger.info(
             "Prepared TED search payload",
             extra={
-                "fields": ",".join(fields),
+                "fields": params["fields"],
                 "limit": limit_value,
                 "sort": sort_field,
                 "order": sort_order_value,
                 "page": page_value,
             },
         )
-        
+
         try:
-            response = self.session.post(url, json=payload, timeout=30)
+            response = self.session.get(
+                url,
+                params=params,
+                headers={"Accept": "application/json"},
+                timeout=30,
+            )
             response.raise_for_status()
             data = response.json()
-            
+
             count = 0
             notices = data.get("notices", [])
-            
+
             for notice in notices:
-                reference_no = notice.get("publicationNumber", "")
+                reference_no = (
+                    notice.get("publicationNumber")
+                    or notice.get("publication-number")
+                    or ""
+                )
                 title = notice.get("title", "")
-                description = notice.get("description", "")
-                pub_date_str = notice.get("publicationDate", "")
-                deadline_str = notice.get("deadlineDate", "")
-                buyer_country = notice.get("buyerCountry", "")
-                buyer_name = notice.get("buyerName", "")
-                notice_type = notice.get("noticeType", "")
-                
+                description = (
+                    notice.get("description")
+                    or notice.get("shortDescription")
+                    or ""
+                )
+                pub_date_str = (
+                    notice.get("publicationDate")
+                    or notice.get("publication-date")
+                    or ""
+                )
+                deadline_str = (
+                    notice.get("deadlineDate")
+                    or notice.get("deadline-date")
+                    or ""
+                )
+                buyer_country = (
+                    notice.get("buyerCountry")
+                    or notice.get("buyer-country")
+                    or ""
+                )
+                buyer_name = (
+                    notice.get("buyerName")
+                    or notice.get("buyer-name")
+                    or ""
+                )
+                notice_type = (
+                    notice.get("noticeType")
+                    or notice.get("notice-type")
+                    or ""
+                )
+
                 # 날짜 파싱
                 try:
                     published_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00")) if pub_date_str else None
@@ -456,12 +556,21 @@ class TenderCrawler:
                 
                 if self.save_to_db(tender_data):
                     count += 1
-            
+
             app.logger.info(f"TED crawling completed: {count} tenders processed")
             return count
-            
-        except Exception as e:
-            app.logger.error(f"TED crawling failed: {e}")
+
+        except requests.HTTPError as exc:
+            detail = ""
+            if exc.response is not None:
+                detail = f" - {exc.response.text[:200]}"
+            app.logger.error(f"TED crawling failed: {exc}{detail}")
+            return 0
+        except requests.RequestException as exc:
+            app.logger.error(f"TED crawling failed: {exc}")
+            return 0
+        except Exception as exc:
+            app.logger.error(f"TED crawling failed: {exc}")
             return 0
 
 # 크롤러 인스턴스
