@@ -6,7 +6,7 @@
 {% block content %}
 <div class="card">
     <h1>MCP 입찰 정보 수집 서버</h1>
-    <p>UNGM과 TED 입찰 공고를 자동으로 수집하고 관리하는 시스템입니다.</p>
+    <p>UNGM, SAM.gov 및 TED 입찰 공고를 자동으로 수집하고 관리하는 시스템입니다.</p>
     
     <div class="stats">
         <div class="stat-card">
@@ -85,7 +85,15 @@ async function manualCrawl(event) {
         const result = await response.json();
         
         if (result.status === 'success') {
-            statusDiv.textContent = '크롤링 완료! 페이지를 새로고침하여 업데이트된 데이터를 확인하세요.';
+            const summary = result.results || {};
+            const ungmCount = summary.ungm ?? '-';
+            const samCount = summary.sam ?? '-';
+            const tedCount = summary.ted ?? '-';
+            const durationInfo = Number.isFinite(summary.duration)
+                ? ` (소요 시간: ${summary.duration.toFixed(1)}초)`
+                : '';
+
+            statusDiv.textContent = `크롤링 완료! UNGM: ${ungmCount}건, SAM.gov: ${samCount}건, TED: ${tedCount}건 수집되었습니다.${durationInfo} 페이지를 새로고침하여 업데이트된 데이터를 확인하세요.`;
             statusDiv.className = 'alert alert-success';
             setTimeout(() => {
                 location.reload();
