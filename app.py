@@ -1058,7 +1058,7 @@ class TenderCrawler:
 # 크롤러 인스턴스
 crawler = TenderCrawler()
 
-def crawl_all():
+def crawl_all() -> Dict[str, Any]:
     """전체 크롤링 작업"""
     app.logger.info("Starting scheduled crawling job...")
     start_time = datetime.now()
@@ -1079,6 +1079,13 @@ def crawl_all():
         sam_count,
         ted_count,
     )
+
+    return {
+        "ungm": ungm_count,
+        "sam": sam_count,
+        "ted": ted_count,
+        "duration": duration,
+    }
 
 # 스케줄러 설정
 scheduler = BackgroundScheduler() if BackgroundScheduler else None
@@ -1153,8 +1160,14 @@ def get_tenders():
 def manual_crawl():
     """수동 크롤링 트리거"""
     try:
-        crawl_all()
-        return jsonify({"status": "success", "message": "Crawling completed"})
+        results = crawl_all()
+        return jsonify(
+            {
+                "status": "success",
+                "message": "Crawling completed",
+                "results": results,
+            }
+        )
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
