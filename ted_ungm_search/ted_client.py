@@ -137,14 +137,14 @@ def build_query(
 
 
 def _normalise_fields(fields: Optional[Sequence[str]]) -> List[str]:
-    if not fields:
+    if fields is None:
         return list(DEFAULT_FIELDS)
     result: List[str] = []
     for field in fields:
         field_name = field.strip()
         if field_name:
             result.append(field_name)
-    return result or list(DEFAULT_FIELDS)
+    return result
 
 
 @retry(
@@ -215,13 +215,19 @@ def search_once(
     """Execute a single TED search request."""
 
     selected_fields = _normalise_fields(fields)
+    include_fields_param = fields is not None
     params: Dict[str, Any] = {
         "q": q,
-        "fields": selected_fields,
         "limit": limit,
         "sort": sort_field,
         "order": sort_order,
     }
+
+    if include_fields_param:
+        if selected_fields:
+            params["fields"] = selected_fields
+    else:
+        params["fields"] = selected_fields
 
     if iteration_token:
         logger.info(
