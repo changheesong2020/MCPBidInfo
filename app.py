@@ -396,6 +396,28 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
             return None
 
 
+def _coerce_text(value: Any) -> str:
+    """Return a safe string representation for response text payloads."""
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.decode("latin-1", errors="ignore")
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _preview_text(value: Any, length: int = 200) -> str:
+    """Return a short preview of a response payload for logging."""
+
+    text = _coerce_text(value)
+    return text[:length] if length >= 0 else text
+
+
 def _normalise_ungm_value(value: Any) -> Optional[str]:
     """Normalise nested UNGM JSON fields to a plain string."""
 
@@ -538,7 +560,7 @@ class TenderCrawler:
                     cookie_token = cookie.value
                     break
 
-        text = getattr(response, "text", "") or ""
+        text = _coerce_text(getattr(response, "text", ""))
 
         if not form_token:
             for pattern in (
@@ -653,7 +675,7 @@ class TenderCrawler:
             )
             if response.ok:
                 return response
-            body = response.text or ""
+            body = _coerce_text(getattr(response, "text", ""))
             if response.status_code == 404 and "FileNotFound" in body:
                 app.logger.debug(
                     "UNGM search attempt returned FileNotFound",
@@ -920,8 +942,8 @@ class TenderCrawler:
             response = exc.response
             should_retry = False
             if response is not None and response.status_code == 404:
-                body_preview = (response.text or "")[:200]
-                if "FileNotFound" in response.url or "FileNotFound" in body_preview:
+                body_preview = _preview_text(response.text)
+                if "FileNotFound" in (response.url or "") or "FileNotFound" in body_preview:
                     should_retry = True
             if should_retry:
                 app.logger.warning(
@@ -942,7 +964,7 @@ class TenderCrawler:
                 except Exception as retry_exc:
                     detail = ""
                     if isinstance(retry_exc, requests.HTTPError) and retry_exc.response is not None:
-                        detail = f" - {retry_exc.response.text[:200]}"
+                        detail = f" - {_preview_text(retry_exc.response.text)}"
                     app.logger.error(
                         f"UNGM crawling failed after retry: {retry_exc}{detail}"
                     )
@@ -950,7 +972,7 @@ class TenderCrawler:
             else:
                 detail = ""
                 if response is not None:
-                    detail = f" - {response.text[:200]}"
+                    detail = f" - {_preview_text(response.text)}"
                 app.logger.error(f"UNGM crawling failed: {exc}{detail}")
                 return 0
         except requests.RequestException as exc:
@@ -958,7 +980,7 @@ class TenderCrawler:
             return 0
 
         content_type = (response.headers.get("Content-Type") or "").lower()
-        body_preview = (response.text or "").lstrip()
+        body_preview = _coerce_text(getattr(response, "text", "")).lstrip()
         if "application/json" in content_type or body_preview.startswith("{") or body_preview.startswith("["):
             try:
                 json_payload = response.json()
@@ -1098,7 +1120,7 @@ class TenderCrawler:
                     try:
                         detail_payload = json.dumps(exc.response.json())[:200]
                     except ValueError:
-                        detail_payload = (exc.response.text or "")[:200]
+                        detail_payload = _preview_text(exc.response.text)
                     if detail_payload:
                         detail = f" - {detail_payload}"
                 app.logger.error(f"SAM.gov crawling failed: {masked}{detail}")
