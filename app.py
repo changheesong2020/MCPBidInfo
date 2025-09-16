@@ -38,7 +38,11 @@ from logging.handlers import RotatingFileHandler
 
 from ted_ungm_search.ted_client import (
     DEFAULT_FIELDS as TED_DEFAULT_FIELDS,
+    TedClientError,
+    TedHTTPError,
     build_query as build_ted_query,
+    iterate_all as ted_iterate_all,
+    search_once as ted_search_once,
 )
 from ted_ungm_search.ungm_helpers import build_ungm_deeplink
 
@@ -539,8 +543,6 @@ class TenderCrawler:
         """TED 사이트 크롤링"""
         app.logger.info("Starting TED crawling...")
 
-        url = "https://api.ted.europa.eu/v3/notices/search"
-
         ted_settings = self.get_ted_settings()
         search_query = ted_settings.get("query") or _default_ted_query()
         fields = ted_settings.get("fields") or list(DEFAULT_TED_FIELDS)
@@ -571,45 +573,81 @@ class TenderCrawler:
         if not field_tokens:
             field_tokens = list(DEFAULT_TED_FIELDS)
 
-        payload = {
-            "q": search_query,
-            "fields": ",".join(field_tokens),
-            "limit": limit_value,
-            "sort": sort_field,
-            "order": sort_order_value,
-            "page": page_value,
-        }
+        mode_raw = ted_settings.get("mode")
+        try:
+            mode_value = str(mode_raw).strip().lower() if mode_raw is not None else "page"
+        except Exception:
+            mode_value = "page"
+        if mode_value not in {"page", "iteration"}:
+            mode_value = "page"
 
-        mode_value = ted_settings.get("mode")
-        if mode_value:
-            payload["mode"] = str(mode_value)
-
+        fields_log = ",".join(field_tokens)
         app.logger.info(
-            "Prepared TED search payload",
+            "Prepared TED search parameters",
             extra={
-                "fields": payload["fields"],
+                "fields": fields_log,
                 "limit": limit_value,
                 "sort": sort_field,
                 "order": sort_order_value,
                 "page": page_value,
-                "mode": payload.get("mode"),
+                "mode": mode_value,
             },
         )
 
         try:
-            response = self.session.post(
-                url,
-                json=payload,
-                headers={"Accept": "application/json"},
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
+            search_kwargs = {
+                "q": search_query,
+                "fields": field_tokens,
+                "sort_field": sort_field,
+                "sort_order": sort_order_value,
+            }
+
+            notice_iterable = None
+            page_result = None
+
+            if mode_value == "iteration":
+                app.logger.info(
+                    "Executing TED iteration crawl",
+                    extra={
+                        "batch_limit": limit_value,
+                        "sort": sort_field,
+                        "order": sort_order_value,
+                    },
+                )
+                notice_iterable = ted_iterate_all(
+                    batch_limit=limit_value,
+                    **search_kwargs,
+                )
+            else:
+                app.logger.info(
+                    "Requesting TED page",
+                    extra={
+                        "page": page_value,
+                        "limit": limit_value,
+                        "sort": sort_field,
+                        "order": sort_order_value,
+                    },
+                )
+                page_result = ted_search_once(
+                    page=page_value,
+                    limit=limit_value,
+                    **search_kwargs,
+                )
+                app.logger.info(
+                    "Received TED page",
+                    extra={
+                        "page": page_result.page,
+                        "count": page_result.count,
+                        "total": page_result.total,
+                        "has_next": bool(page_result.next_page_token),
+                    },
+                )
+                notice_iterable = iter(page_result.notices)
 
             count = 0
-            notices = data.get("notices", [])
 
-            for notice in notices:
+            for notice_obj in notice_iterable:
+                notice = notice_obj.to_dict() if hasattr(notice_obj, "to_dict") else dict(notice_obj)
                 reference_no = (
                     notice.get("publicationNumber")
                     or notice.get("publication-number")
@@ -634,6 +672,7 @@ class TenderCrawler:
                 buyer_country = (
                     notice.get("buyerCountry")
                     or notice.get("buyer-country")
+                    or notice.get("place-of-performance.country")
                     or ""
                 )
                 buyer_name = (
@@ -650,16 +689,16 @@ class TenderCrawler:
                 # 날짜 파싱
                 try:
                     published_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00")) if pub_date_str else None
-                except:
+                except Exception:
                     published_date = None
-                
+
                 try:
                     deadline_date = datetime.fromisoformat(deadline_str.replace("Z", "+00:00")) if deadline_str else None
-                except:
+                except Exception:
                     deadline_date = None
-                
+
                 detail_url = f"https://ted.europa.eu/udl?uri=TED:NOTICE:{reference_no}" if reference_no else None
-                
+
                 tender_data = {
                     "site": "TED",
                     "reference_no": reference_no,
@@ -670,20 +709,27 @@ class TenderCrawler:
                     "organization": buyer_name,
                     "notice_type": notice_type,
                     "country": buyer_country,
-                    "detail_url": detail_url
+                    "detail_url": detail_url,
                 }
-                
+
                 if self.save_to_db(tender_data):
                     count += 1
 
             app.logger.info(f"TED crawling completed: {count} tenders processed")
             return count
 
-        except requests.HTTPError as exc:
+        except TedHTTPError as exc:
             detail = ""
-            if exc.response is not None:
-                detail = f" - {exc.response.text[:200]}"
+            if exc.payload:
+                try:
+                    detail_payload = json.dumps(exc.payload)[:200]
+                except (TypeError, ValueError):
+                    detail_payload = str(exc.payload)[:200]
+                detail = f" - {detail_payload}"
             app.logger.error(f"TED crawling failed: {exc}{detail}")
+            return 0
+        except TedClientError as exc:
+            app.logger.error(f"TED crawling failed: {exc}")
             return 0
         except requests.RequestException as exc:
             app.logger.error(f"TED crawling failed: {exc}")
