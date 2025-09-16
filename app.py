@@ -8,10 +8,12 @@ from typing import List, Dict, Optional, Any, Tuple
 
 try:
     import requests
-    from requests.adapters import HTTPAdapter, Retry
-except Exception:  # pragma: no cover - optional dependency
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+except ImportError:  # pragma: no cover - optional dependency
     requests = None
-    HTTPAdapter = Retry = None
+    HTTPAdapter = None
+    Retry = None
 try:
     from bs4 import BeautifulSoup
 except Exception:  # pragma: no cover - optional dependency
@@ -123,6 +125,13 @@ for _extra_field in [
 ]:
     if _extra_field not in DEFAULT_TED_FIELDS:
         DEFAULT_TED_FIELDS.append(_extra_field)
+
+DEFAULT_SAM_KEYWORDS = ["PCR", "reagent", "diagnostic"]
+DEFAULT_SAM_LOOKBACK_DAYS = 30
+DEFAULT_SAM_NOTICE_TYPES: List[str] = []
+DEFAULT_SAM_SET_ASIDES: List[str] = []
+DEFAULT_SAM_PAGE_SIZE = 100
+DEFAULT_SAM_MAX_PAGES = 1
 
 
 def _default_ted_builder() -> Dict[str, Any]:
@@ -279,18 +288,117 @@ def _parse_ted_config(config_text: Optional[str]) -> Tuple[Dict[str, Any], Dict[
 
     return settings, builder
 
+
+def _default_sam_settings() -> Dict[str, Any]:
+    today = datetime.utcnow().date()
+    return {
+        "keywords": list(DEFAULT_SAM_KEYWORDS),
+        "posted_from": (today - timedelta(days=DEFAULT_SAM_LOOKBACK_DAYS)).isoformat(),
+        "posted_to": today.isoformat(),
+        "notice_types": list(DEFAULT_SAM_NOTICE_TYPES),
+        "set_asides": list(DEFAULT_SAM_SET_ASIDES),
+        "naics": [],
+        "limit": DEFAULT_SAM_PAGE_SIZE,
+        "max_pages": DEFAULT_SAM_MAX_PAGES,
+        "sort": "-modifiedDate",
+    }
+
+
+def _parse_sam_config(config_text: Optional[str]) -> Dict[str, Any]:
+    settings = _default_sam_settings()
+
+    if not config_text:
+        return settings
+
+    try:
+        data = json.loads(config_text)
+    except (TypeError, ValueError):
+        keywords = _split_tokens(config_text)
+        if keywords:
+            settings["keywords"] = keywords
+        return settings
+
+    if not isinstance(data, dict):
+        keywords = _split_tokens(config_text)
+        if keywords:
+            settings["keywords"] = keywords
+        return settings
+
+    keywords_value = data.get("keywords")
+    keywords_list = _ensure_list(keywords_value)
+    if keywords_list:
+        settings["keywords"] = keywords_list
+
+    for key in ("notice_types", "set_asides", "naics"):
+        value_list = _ensure_list(data.get(key))
+        if value_list:
+            settings[key] = value_list
+
+    posted_from = data.get("posted_from") or data.get("postedFrom")
+    if isinstance(posted_from, str) and posted_from.strip():
+        settings["posted_from"] = posted_from.strip()
+
+    posted_to = data.get("posted_to") or data.get("postedTo")
+    if isinstance(posted_to, str) and posted_to.strip():
+        settings["posted_to"] = posted_to.strip()
+
+    sort_value = data.get("sort")
+    if isinstance(sort_value, str) and sort_value.strip():
+        settings["sort"] = sort_value.strip()
+
+    for key in ("limit", "max_pages"):
+        try:
+            raw = data.get(key)
+            if raw is not None:
+                parsed = int(raw)
+                if parsed > 0:
+                    settings[key] = parsed
+        except (TypeError, ValueError):
+            continue
+
+    return settings
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    text = text.replace("Z", "+00:00")
+    if re.match(r".*[\+\-]\d{4}$", text) and text[-3] != ":":
+        text = f"{text[:-4]}{text[-4:-2]}:{text[-2:]}"
+
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return None
+
 class TenderCrawler:
     def __init__(self):
         if requests is None:
             raise RuntimeError("requests library is required for crawling")
+        if HTTPAdapter is None:
+            raise RuntimeError("requests.adapters.HTTPAdapter is required for crawling")
+
         self.session = requests.Session()
-        retry_strategy = Retry(
-            total=5,
-            backoff_factor=0.3,
-            status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
+        retry_strategy = None
+        if Retry is not None:
+            retry_strategy = Retry(
+                total=5,
+                backoff_factor=0.3,
+                status_forcelist=[500, 502, 503, 504],
+                allowed_methods=frozenset({"GET", "POST"}),
+            )
+
+        adapter = (
+            HTTPAdapter(max_retries=retry_strategy) if retry_strategy else HTTPAdapter()
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         self.session.headers.update(
@@ -376,6 +484,11 @@ class TenderCrawler:
         config = session.query(SearchConfig).filter_by(site="TED").first()
         settings, _ = _parse_ted_config(config.query if config else None)
         return settings
+
+    def get_sam_settings(self) -> Dict[str, Any]:
+        """SAM.gov 검색 설정을 구조화된 dict로 반환"""
+        config = session.query(SearchConfig).filter_by(site="SAM").first()
+        return _parse_sam_config(config.query if config else None)
     
     def save_to_db(self, tender_data: Dict[str, Any]) -> bool:
         """입찰 정보를 DB에 저장 (UPSERT)"""
@@ -451,8 +564,6 @@ class TenderCrawler:
 
         try:
             verification_token: Optional[str] = None
-
-            verification_token: Optional[str] = None
             verification_cookie: Optional[str] = None
 
             for bootstrap_url in (referer_url, url):
@@ -498,8 +609,8 @@ class TenderCrawler:
             )
             response.raise_for_status()
 
-            # BeautifulSoup으로 파싱 (html5lib 파서 사용)
-            soup = BeautifulSoup(response.content, 'html5lib')
+            # BeautifulSoup으로 파싱 (기본 HTML 파서 사용)
+            soup = BeautifulSoup(response.content, 'html.parser')
             rows = soup.select('.tableRow')
 
             count = 0
@@ -571,6 +682,179 @@ class TenderCrawler:
         except Exception as exc:
             app.logger.error(f"UNGM crawling failed: {exc}")
             return 0
+
+    def crawl_sam(self) -> int:
+        """SAM.gov API를 통해 입찰 정보를 수집"""
+        app.logger.info("Starting SAM.gov crawling...")
+
+        api_key = os.getenv("SAM_API_KEY") or os.getenv("SAM_GOV_API_KEY")
+        if not api_key:
+            app.logger.warning(
+                "SAM.gov crawling skipped: SAM_API_KEY environment variable is not set"
+            )
+            return 0
+
+        sam_settings = self.get_sam_settings()
+
+        base_url = "https://api.sam.gov/prod/opportunities/v1/search"
+        keywords = sam_settings.get("keywords", [])
+        posted_from = sam_settings.get("posted_from")
+        posted_to = sam_settings.get("posted_to")
+        notice_types = sam_settings.get("notice_types", [])
+        set_asides = sam_settings.get("set_asides", [])
+        naics = sam_settings.get("naics", [])
+        sort_value = sam_settings.get("sort", "-modifiedDate")
+
+        try:
+            page_limit = int(sam_settings.get("limit", DEFAULT_SAM_PAGE_SIZE))
+        except (TypeError, ValueError):
+            page_limit = DEFAULT_SAM_PAGE_SIZE
+        page_limit = max(1, min(page_limit, 100))
+
+        try:
+            max_pages = int(sam_settings.get("max_pages", DEFAULT_SAM_MAX_PAGES))
+        except (TypeError, ValueError):
+            max_pages = DEFAULT_SAM_MAX_PAGES
+        max_pages = max(1, max_pages)
+
+        params: Dict[str, Any] = {
+            "api_key": api_key,
+            "limit": page_limit,
+            "offset": 0,
+        }
+
+        if keywords:
+            params["q"] = " ".join(keywords)
+        if posted_from:
+            params["postedFrom"] = posted_from
+        if posted_to:
+            params["postedTo"] = posted_to
+        if notice_types:
+            params["noticeType"] = ",".join(notice_types)
+        if set_asides:
+            params["setAside"] = ",".join(set_asides)
+        if naics:
+            params["naics"] = ",".join(naics)
+        if sort_value:
+            params["sort"] = sort_value
+
+        total_saved = 0
+        pages_fetched = 0
+
+        while pages_fetched < max_pages:
+            try:
+                response = self.session.get(base_url, params=params, timeout=30)
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                app.logger.error(f"SAM.gov crawling failed: {exc}")
+                return total_saved
+
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                app.logger.error(
+                    f"SAM.gov crawling failed: invalid JSON response - {exc}"
+                )
+                return total_saved
+
+            notices = (
+                payload.get("opportunitiesData")
+                or payload.get("opportunities")
+                or payload.get("data")
+                or []
+            )
+
+            if not isinstance(notices, list):
+                app.logger.error("SAM.gov crawling failed: unexpected payload structure")
+                return total_saved
+
+            if not notices:
+                break
+
+            for notice in notices:
+                if not isinstance(notice, dict):
+                    continue
+
+                reference_no = (
+                    notice.get("solicitationNumber")
+                    or notice.get("noticeId")
+                    or notice.get("id")
+                    or ""
+                )
+                if not reference_no:
+                    continue
+
+                title = notice.get("title") or notice.get("subject") or ""
+                description = (
+                    notice.get("description")
+                    or notice.get("descriptionText")
+                    or notice.get("summary")
+                    or ""
+                )
+                published_date = _parse_iso_datetime(
+                    notice.get("postedDate") or notice.get("publishDate")
+                )
+                deadline_date = _parse_iso_datetime(
+                    notice.get("responseDate")
+                    or notice.get("closeDate")
+                    or notice.get("dueDate")
+                )
+                organization = (
+                    notice.get("organizationName")
+                    or (notice.get("organizationHierarchy") or {}).get(
+                        "organizationName"
+                    )
+                    or (notice.get("office") or {}).get("name")
+                    or ""
+                )
+                notice_type = notice.get("type") or notice.get("noticeType") or ""
+
+                place = notice.get("placeOfPerformance") or {}
+                if isinstance(place, dict):
+                    country = (
+                        place.get("country")
+                        or (place.get("address") or {}).get("country")
+                        or ""
+                    )
+                else:
+                    country = ""
+
+                detail_url = notice.get("uiLink") or notice.get("link")
+
+                tender_data = {
+                    "site": "SAM",
+                    "reference_no": str(reference_no),
+                    "title": title or "(No title)",
+                    "description": description,
+                    "published_date": published_date,
+                    "deadline_date": deadline_date,
+                    "organization": organization,
+                    "notice_type": notice_type,
+                    "country": country,
+                    "detail_url": detail_url,
+                }
+
+                if self.save_to_db(tender_data):
+                    total_saved += 1
+
+            total_records = payload.get("totalRecords")
+            params["offset"] = params.get("offset", 0) + page_limit
+            pages_fetched += 1
+
+            if total_records is not None:
+                try:
+                    if params["offset"] >= int(total_records):
+                        break
+                except (TypeError, ValueError):
+                    pass
+
+            if len(notices) < page_limit:
+                break
+
+        app.logger.info(
+            f"SAM.gov crawling completed: {total_saved} tenders processed"
+        )
+        return total_saved
 
     def crawl_ted(self) -> int:
         """TED 사이트 크롤링"""
@@ -778,15 +1062,23 @@ def crawl_all():
     """전체 크롤링 작업"""
     app.logger.info("Starting scheduled crawling job...")
     start_time = datetime.now()
-    
+
     ungm_count = crawler.crawl_ungm()
     time.sleep(2)  # 사이트 간 간격
+    sam_count = crawler.crawl_sam()
+    time.sleep(2)
     ted_count = crawler.crawl_ted()
-    
+
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
-    
-    app.logger.info(f"Crawling job completed in {duration:.2f}s - UNGM: {ungm_count}, TED: {ted_count}")
+
+    app.logger.info(
+        "Crawling job completed in %.2fs - UNGM: %s, SAM: %s, TED: %s",
+        duration,
+        ungm_count,
+        sam_count,
+        ted_count,
+    )
 
 # 스케줄러 설정
 scheduler = BackgroundScheduler() if BackgroundScheduler else None
@@ -881,6 +1173,8 @@ def search_config():
         today = datetime.utcnow().date()
         default_ted_to = today.isoformat()
         default_ted_from = (today - timedelta(days=DEFAULT_TED_LOOKBACK_DAYS)).isoformat()
+        default_sam_to = today.isoformat()
+        default_sam_from = (today - timedelta(days=DEFAULT_SAM_LOOKBACK_DAYS)).isoformat()
 
         ted_date_from = request.form.get('ted_date_from', '').strip() or default_ted_from
         ted_date_to = request.form.get('ted_date_to', '').strip() or default_ted_to
@@ -941,6 +1235,45 @@ def search_config():
         }
         ted_payload_text = json.dumps(ted_payload, ensure_ascii=False)
 
+        sam_keywords_input = request.form.get('sam_keywords', '')
+        sam_keywords = _split_tokens(sam_keywords_input)
+        if not sam_keywords:
+            sam_keywords = list(DEFAULT_SAM_KEYWORDS)
+        sam_posted_from = request.form.get('sam_posted_from', '').strip() or default_sam_from
+        sam_posted_to = request.form.get('sam_posted_to', '').strip() or default_sam_to
+        sam_notice_types = [token.upper() for token in _split_tokens(request.form.get('sam_notice_types', ''))]
+        sam_set_asides = [token.upper() for token in _split_tokens(request.form.get('sam_set_asides', ''))]
+        sam_naics = _split_tokens(request.form.get('sam_naics', ''))
+
+        try:
+            sam_limit = int(request.form.get('sam_limit', DEFAULT_SAM_PAGE_SIZE))
+        except (TypeError, ValueError):
+            sam_limit = DEFAULT_SAM_PAGE_SIZE
+        sam_limit = max(1, min(sam_limit, 100))
+
+        try:
+            sam_max_pages = int(request.form.get('sam_max_pages', DEFAULT_SAM_MAX_PAGES))
+        except (TypeError, ValueError):
+            sam_max_pages = DEFAULT_SAM_MAX_PAGES
+        sam_max_pages = max(1, sam_max_pages)
+
+        sam_sort = request.form.get('sam_sort', '-modifiedDate') or '-modifiedDate'
+        sam_sort = sam_sort.strip() or '-modifiedDate'
+
+        sam_payload = {
+            "version": 1,
+            "keywords": sam_keywords,
+            "posted_from": sam_posted_from,
+            "posted_to": sam_posted_to,
+            "notice_types": sam_notice_types,
+            "set_asides": sam_set_asides,
+            "naics": sam_naics,
+            "limit": sam_limit,
+            "max_pages": sam_max_pages,
+            "sort": sam_sort,
+        }
+        sam_payload_text = json.dumps(sam_payload, ensure_ascii=False)
+
         # UNGM 설정 저장
         ungm_config = session.query(SearchConfig).filter_by(site='UNGM').first()
         if ungm_config:
@@ -959,6 +1292,16 @@ def search_config():
             ted_config = SearchConfig(site='TED', query=ted_payload_text, last_updated=datetime.utcnow())
             session.add(ted_config)
 
+        sam_config = session.query(SearchConfig).filter_by(site='SAM').first()
+        if sam_config:
+            sam_config.query = sam_payload_text
+            sam_config.last_updated = datetime.utcnow()
+        else:
+            sam_config = SearchConfig(
+                site='SAM', query=sam_payload_text, last_updated=datetime.utcnow()
+            )
+            session.add(sam_config)
+
         session.commit()
         app.logger.info("Search configurations updated")
         return redirect(url_for('search_config'))
@@ -966,6 +1309,7 @@ def search_config():
     # GET 요청 - 현재 설정 로드
     ungm_config = session.query(SearchConfig).filter_by(site='UNGM').first()
     ted_config = session.query(SearchConfig).filter_by(site='TED').first()
+    sam_config = session.query(SearchConfig).filter_by(site='SAM').first()
 
     if ungm_config is None:
         ungm_keywords_value = ", ".join(DEFAULT_UNGM_KEYWORDS)
@@ -975,10 +1319,13 @@ def search_config():
     ungm_preview_link = build_ungm_deeplink(keywords=ungm_keyword_list)
 
     ted_settings, ted_builder = _parse_ted_config(ted_config.query if ted_config else None)
+    sam_settings = _parse_sam_config(sam_config.query if sam_config else None)
 
     today = datetime.utcnow().date()
     default_ted_to = today.isoformat()
     default_ted_from = (today - timedelta(days=DEFAULT_TED_LOOKBACK_DAYS)).isoformat()
+    default_sam_to = today.isoformat()
+    default_sam_from = (today - timedelta(days=DEFAULT_SAM_LOOKBACK_DAYS)).isoformat()
 
     builder_data = {
         "date_from": str(ted_builder.get("date_from") or default_ted_from),
@@ -995,6 +1342,16 @@ def search_config():
     ted_sort_order = (ted_settings.get("sort_order") or "DESC").upper()
     ted_mode = ted_settings.get("mode", "page")
     ted_page_value = ted_settings.get("page", 1)
+
+    sam_keywords_value = ", ".join(sam_settings.get("keywords", DEFAULT_SAM_KEYWORDS))
+    sam_posted_from_value = sam_settings.get("posted_from") or default_sam_from
+    sam_posted_to_value = sam_settings.get("posted_to") or default_sam_to
+    sam_notice_types_value = ", ".join(sam_settings.get("notice_types", []))
+    sam_set_asides_value = ", ".join(sam_settings.get("set_asides", []))
+    sam_naics_value = ", ".join(sam_settings.get("naics", []))
+    sam_limit_value = sam_settings.get("limit", DEFAULT_SAM_PAGE_SIZE)
+    sam_max_pages_value = sam_settings.get("max_pages", DEFAULT_SAM_MAX_PAGES)
+    sam_sort_value = sam_settings.get("sort", "-modifiedDate")
 
     return render_template(
         'search_config.html',
@@ -1014,6 +1371,16 @@ def search_config():
         ted_mode=ted_mode,
         ted_page=str(ted_page_value),
         ted_default_fields=DEFAULT_TED_FIELDS,
+        sam_keywords=sam_keywords_value,
+        sam_posted_from=sam_posted_from_value,
+        sam_posted_to=sam_posted_to_value,
+        sam_notice_types=sam_notice_types_value,
+        sam_set_asides=sam_set_asides_value,
+        sam_naics=sam_naics_value,
+        sam_limit=sam_limit_value,
+        sam_max_pages=sam_max_pages_value,
+        sam_sort=sam_sort_value,
+        default_sam_keywords=", ".join(DEFAULT_SAM_KEYWORDS),
     )
 
 @app.route('/tenders')

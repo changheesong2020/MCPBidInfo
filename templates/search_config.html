@@ -68,6 +68,51 @@
             </div>
         </div>
     </div>
+
+    <div class="form-section">
+        <h3>SAM.gov 검색 조건</h3>
+        <p class="alert alert-info" style="margin-top: 0;">SAM.gov API를 사용하려면 서버 환경 변수 <code>SAM_API_KEY</code> (또는 <code>SAM_GOV_API_KEY</code>)를 설정해야 합니다.</p>
+        <div class="form-grid" style="margin-top: 1rem;">
+            <div class="form-group">
+                <label for="sam_keywords">키워드</label>
+                <input type="text" id="sam_keywords" name="sam_keywords" value="{{ sam_keywords }}" placeholder="예: {{ default_sam_keywords }}">
+                <small>쉼표 또는 줄바꿈으로 여러 키워드를 입력하세요. 값이 없으면 기본 키워드가 사용됩니다.</small>
+            </div>
+            <div class="form-group">
+                <label for="sam_posted_from">게시일 (시작)</label>
+                <input type="date" id="sam_posted_from" name="sam_posted_from" value="{{ sam_posted_from }}">
+            </div>
+            <div class="form-group">
+                <label for="sam_posted_to">게시일 (종료)</label>
+                <input type="date" id="sam_posted_to" name="sam_posted_to" value="{{ sam_posted_to }}">
+            </div>
+            <div class="form-group">
+                <label for="sam_notice_types">Notice Type</label>
+                <input type="text" id="sam_notice_types" name="sam_notice_types" value="{{ sam_notice_types }}" placeholder="예: P,R">
+                <small>필요 시 Notice Type 코드를 입력하세요. 쉼표 또는 줄바꿈으로 구분합니다.</small>
+            </div>
+            <div class="form-group">
+                <label for="sam_set_asides">Set-Aside</label>
+                <input type="text" id="sam_set_asides" name="sam_set_asides" value="{{ sam_set_asides }}" placeholder="예: WOSB,SB">
+            </div>
+            <div class="form-group">
+                <label for="sam_naics">NAICS 코드</label>
+                <input type="text" id="sam_naics" name="sam_naics" value="{{ sam_naics }}" placeholder="예: 325413">
+            </div>
+            <div class="form-group">
+                <label for="sam_limit">페이지당 결과 수</label>
+                <input type="number" id="sam_limit" name="sam_limit" min="1" max="100" value="{{ sam_limit }}">
+            </div>
+            <div class="form-group">
+                <label for="sam_max_pages">최대 페이지 수</label>
+                <input type="number" id="sam_max_pages" name="sam_max_pages" min="1" value="{{ sam_max_pages }}">
+            </div>
+            <div class="form-group">
+                <label for="sam_sort">정렬 필드</label>
+                <input type="text" id="sam_sort" name="sam_sort" value="{{ sam_sort }}" placeholder="예: -modifiedDate">
+            </div>
+        </div>
+    </div>
     <button type="submit" class="btn">설정 저장</button>
 </form>
 {% endblock %}

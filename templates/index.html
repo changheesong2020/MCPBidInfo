@@ -22,6 +22,10 @@
             <div>TED 공고</div>
         </div>
         <div class="stat-card">
+            <div class="stat-number" id="sam-count">-</div>
+            <div>SAM.gov 공고</div>
+        </div>
+        <div class="stat-card">
             <div class="stat-number" id="today-count">-</div>
             <div>오늘 수집</div>
         </div>
@@ -45,19 +49,21 @@ async function loadStats() {
     try {
         const response = await fetch('/api/tenders?limit=1000');
         const data = await response.json();
-        
+
         const totalCount = data.total;
         const ungmCount = data.tenders.filter(t => t.site === 'UNGM').length;
         const tedCount = data.tenders.filter(t => t.site === 'TED').length;
-        
+        const samCount = data.tenders.filter(t => t.site === 'SAM').length;
+
         const today = new Date().toISOString().split('T')[0];
-        const todayCount = data.tenders.filter(t => 
+        const todayCount = data.tenders.filter(t =>
             t.published_date && t.published_date.startsWith(today)
         ).length;
-        
+
         document.getElementById('total-tenders').textContent = totalCount;
         document.getElementById('ungm-count').textContent = ungmCount;
         document.getElementById('ted-count').textContent = tedCount;
+        document.getElementById('sam-count').textContent = samCount;
         document.getElementById('today-count').textContent = todayCount;
     } catch (error) {
         console.error('통계 로드 실패:', error);
