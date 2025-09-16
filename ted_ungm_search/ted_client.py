@@ -153,9 +153,9 @@ def _normalise_fields(fields: Optional[Sequence[str]]) -> List[str]:
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_exception_type((requests.RequestException, TedTransientError)),
 )
-def _perform_request(params: Dict[str, Union[str, int]]) -> dict:
-    logger.debug("Performing TED request", extra={"params": params})
-    response = _session.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
+def _perform_request(payload: Dict[str, Union[str, int]]) -> dict:
+    logger.debug("Performing TED request", extra={"payload": payload})
+    response = _session.post(API_URL, json=payload, timeout=REQUEST_TIMEOUT)
     if response.status_code in {429} or 500 <= response.status_code < 600:
         raise TedTransientError(
             f"Retryable HTTP status {response.status_code}",

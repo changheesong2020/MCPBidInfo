@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import logging
@@ -228,7 +229,48 @@ class TenderCrawler:
                 "Accept-Language": "en-US,en;q=0.9",
             }
         )
-    
+
+    def _extract_ungm_token(self, response: "requests.Response") -> Optional[str]:
+        token: Optional[str] = None
+
+        if BeautifulSoup is not None:
+            try:
+                soup = BeautifulSoup(response.text, "html.parser")
+                token_input = soup.select_one("input[name='__RequestVerificationToken']")
+                if token_input and token_input.get("value"):
+                    token = token_input.get("value")
+            except Exception as parse_error:
+                app.logger.debug(
+                    "Failed to parse UNGM verification token via BeautifulSoup",
+                    exc_info=parse_error,
+                )
+
+        if not token:
+            token = response.cookies.get("__RequestVerificationToken")
+
+        if not token:
+            token = self.session.cookies.get("__RequestVerificationToken")
+
+        if not token:
+            for cookie in self.session.cookies:
+                if cookie.name.startswith("__RequestVerificationToken") and cookie.value:
+                    token = cookie.value
+                    break
+
+        if not token:
+            text = getattr(response, "text", "") or ""
+            for pattern in (
+                r"name=\"__RequestVerificationToken\"[^>]*value=\"([^\"]+)\"",
+                r"__RequestVerificationToken\"\s*:\s*\"([^\"]+)\"",
+                r"__RequestVerificationToken'\s*:\s*'([^']+)'",
+            ):
+                match = re.search(pattern, text)
+                if match and match.group(1):
+                    token = match.group(1)
+                    break
+
+        return token
+
     def get_search_config(self, site: str) -> str:
         """검색 설정 조회"""
         config = session.query(SearchConfig).filter_by(site=site).first()
@@ -304,24 +346,14 @@ class TenderCrawler:
         }
 
         try:
-            bootstrap_response = self.session.get(referer_url, timeout=30)
-            bootstrap_response.raise_for_status()
+            verification_token: Optional[str] = None
 
-            verification_token = None
-            try:
-                soup = BeautifulSoup(bootstrap_response.text, 'html.parser')
-                token_input = soup.select_one("input[name='__RequestVerificationToken']")
-                if token_input:
-                    verification_token = token_input.get("value")
-            except Exception as parse_error:
-                app.logger.debug(
-                    "Failed to parse UNGM verification token", exc_info=parse_error
-                )
-
-            if not verification_token:
-                verification_token = bootstrap_response.cookies.get(
-                    "__RequestVerificationToken"
-                )
+            for bootstrap_url in (referer_url, url):
+                bootstrap_response = self.session.get(bootstrap_url, timeout=30)
+                bootstrap_response.raise_for_status()
+                verification_token = self._extract_ungm_token(bootstrap_response)
+                if verification_token:
+                    break
 
             if not verification_token:
                 app.logger.error(
@@ -332,6 +364,7 @@ class TenderCrawler:
             request_headers = {
                 "Referer": referer_url,
                 "X-Requested-With": "XMLHttpRequest",
+                "Origin": "https://www.ungm.org",
                 "RequestVerificationToken": verification_token,
             }
             request_payload = dict(payload)
@@ -457,7 +490,7 @@ class TenderCrawler:
         if not field_tokens:
             field_tokens = list(DEFAULT_TED_FIELDS)
 
-        params = {
+        payload = {
             "q": search_query,
             "fields": ",".join(field_tokens),
             "limit": limit_value,
@@ -466,21 +499,26 @@ class TenderCrawler:
             "page": page_value,
         }
 
+        mode_value = ted_settings.get("mode")
+        if mode_value:
+            payload["mode"] = str(mode_value)
+
         app.logger.info(
             "Prepared TED search payload",
             extra={
-                "fields": params["fields"],
+                "fields": payload["fields"],
                 "limit": limit_value,
                 "sort": sort_field,
                 "order": sort_order_value,
                 "page": page_value,
+                "mode": payload.get("mode"),
             },
         )
 
         try:
-            response = self.session.get(
+            response = self.session.post(
                 url,
-                params=params,
+                json=payload,
                 headers={"Accept": "application/json"},
                 timeout=30,
             )
