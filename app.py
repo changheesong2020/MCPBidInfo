@@ -4,7 +4,7 @@ import json
 import time
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Sequence, Iterator
 
 try:
     import requests
@@ -47,6 +47,22 @@ from ted_ungm_search.ted_client import (
     search_once as ted_search_once,
 )
 from ted_ungm_search.ungm_helpers import build_ungm_deeplink
+
+# Logging / parsing helpers
+_API_KEY_PATTERN = re.compile(r"(api_key=)([^&]+)", re.IGNORECASE)
+
+
+def _mask_api_key(text: str) -> str:
+    """Mask API keys embedded in log messages."""
+
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        prefix = match.group(1)
+        return f"{prefix}***"
+
+    return _API_KEY_PATTERN.sub(_replace, text)
 
 # 데이터베이스 모델 설정
 Base = declarative_base()
@@ -379,6 +395,86 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         except ValueError:
             return None
 
+
+def _normalise_ungm_value(value: Any) -> Optional[str]:
+    """Normalise nested UNGM JSON fields to a plain string."""
+
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        for key in ("value", "Value", "Name", "name", "Description", "description", "label", "Label", "text", "Text"):
+            if key in value:
+                nested = _normalise_ungm_value(value[key])
+                if nested:
+                    return nested
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            nested = _normalise_ungm_value(item)
+            if nested:
+                return nested
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _extract_ungm_field(record: Dict[str, Any], keys: Sequence[str]) -> Optional[str]:
+    """Return the first matching value for any of the candidate keys."""
+
+    lower_map = {str(key).lower(): value for key, value in record.items()}
+    for key in keys:
+        value = record.get(key)
+        if value is None:
+            value = lower_map.get(str(key).lower())
+        text = _normalise_ungm_value(value)
+        if text:
+            return text
+    return None
+
+
+def _parse_ungm_date(value: Optional[str]) -> Optional[datetime]:
+    """Parse UNGM date strings with multiple fallback formats."""
+
+    if not value:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    text = re.sub(r"\s*\(.*?\)\s*$", "", text)
+    text = text.replace("GMT", "").replace("UTC", "").strip()
+    iso_candidate = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(iso_candidate)
+    except ValueError:
+        pass
+
+    epoch_match = re.search(r"/Date\((\d+)\)/", text)
+    if epoch_match:
+        try:
+            milliseconds = int(epoch_match.group(1))
+            return datetime.utcfromtimestamp(milliseconds / 1000.0)
+        except ValueError:
+            return None
+
+    for fmt in (
+        "%d-%b-%Y",
+        "%d-%b-%Y %H:%M",
+        "%d-%b-%Y %H:%M:%S",
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%d/%m/%Y",
+        "%d/%m/%Y %H:%M",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+
+    return None
+
 class TenderCrawler:
     def __init__(self):
         if requests is None:
@@ -470,6 +566,246 @@ class TenderCrawler:
 
         return form_token, cookie_token
 
+    def _bootstrap_ungm_tokens(
+        self, referer_url: str, search_url: str
+    ) -> Tuple[str, Optional[str]]:
+        """Fetch the anti-forgery tokens required for UNGM AJAX search."""
+
+        verification_token: Optional[str] = None
+        verification_cookie: Optional[str] = None
+
+        for bootstrap_url in (referer_url, search_url):
+            bootstrap_response = self.session.get(bootstrap_url, timeout=30)
+            bootstrap_response.raise_for_status()
+            form_token, cookie_token = self._extract_ungm_tokens(bootstrap_response)
+            if form_token and not verification_token:
+                verification_token = form_token
+            if cookie_token and not verification_cookie:
+                verification_cookie = cookie_token
+            if verification_token and verification_cookie:
+                break
+
+        if not verification_token:
+            raise RuntimeError("UNGM crawling failed: unable to locate verification token")
+
+        if verification_cookie:
+            try:
+                self.session.cookies.set(
+                    "__RequestVerificationToken",
+                    verification_cookie,
+                    domain="www.ungm.org",
+                    path="/",
+                )
+            except Exception:
+                # Gracefully continue if cookie setting fails; the session may already hold it.
+                pass
+
+        return verification_token, verification_cookie
+
+    def _post_ungm_search(
+        self,
+        url: str,
+        referer_url: str,
+        payload: Dict[str, Any],
+        verification_token: str,
+        verification_cookie: Optional[str],
+    ) -> "requests.Response":
+        """Submit the UNGM search request with resilient header fallbacks."""
+
+        request_payload = dict(payload)
+        request_payload["__RequestVerificationToken"] = verification_token
+
+        base_headers = {
+            "Referer": referer_url,
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://www.ungm.org",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        }
+
+        attempts: List[Tuple[str, Dict[str, str]]] = []
+
+        header_with_cookie = dict(base_headers)
+        header_with_cookie["Content-Type"] = "application/json; charset=UTF-8"
+        header_with_cookie["RequestVerificationToken"] = (
+            f"{verification_cookie}:{verification_token}"
+            if verification_cookie
+            else verification_token
+        )
+        header_with_cookie["X-RequestVerificationToken"] = verification_token
+        attempts.append(("json-cookie", header_with_cookie))
+
+        header_simple = dict(base_headers)
+        header_simple["Content-Type"] = "application/json; charset=UTF-8"
+        header_simple["RequestVerificationToken"] = verification_token
+        header_simple["X-RequestVerificationToken"] = verification_token
+        if verification_cookie:
+            attempts.append(("json-simple", header_simple))
+        elif header_simple["RequestVerificationToken"] != header_with_cookie["RequestVerificationToken"]:
+            attempts.append(("json-simple", header_simple))
+
+        last_response: Optional["requests.Response"] = None
+        for attempt_name, headers in attempts:
+            response = self.session.post(
+                url,
+                json=request_payload,
+                headers=headers,
+                timeout=30,
+            )
+            if response.ok:
+                return response
+            body = response.text or ""
+            if response.status_code == 404 and "FileNotFound" in body:
+                app.logger.debug(
+                    "UNGM search attempt returned FileNotFound",
+                    extra={"attempt": attempt_name, "status": response.status_code},
+                )
+                last_response = response
+                continue
+            response.raise_for_status()
+        if last_response is not None:
+            last_response.raise_for_status()
+        raise requests.HTTPError("UNGM search failed", response=last_response)
+
+    def _process_ungm_json(self, payload: Any, keywords: Sequence[str]) -> int:
+        """Convert a JSON UNGM payload into tender records."""
+
+        records: Sequence[Any] = []
+        if isinstance(payload, dict):
+            for key in (
+                "items",
+                "results",
+                "data",
+                "notices",
+                "Notices",
+                "records",
+                "Records",
+                "rows",
+                "Rows",
+            ):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    records = value
+                    break
+        elif isinstance(payload, list):
+            records = payload
+        else:
+            app.logger.warning(
+                "UNGM JSON payload has unexpected shape",
+                extra={"payload_type": type(payload).__name__},
+            )
+            return 0
+
+        if not records:
+            return 0
+
+        count = 0
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+
+            title = _extract_ungm_field(
+                record,
+                ("title", "noticeTitle", "notice_title", "Name", "TenderTitle"),
+            )
+            if not title:
+                continue
+
+            if keywords:
+                title_lower = title.lower()
+                if not any(keyword in title_lower for keyword in keywords):
+                    continue
+
+            reference_no = _extract_ungm_field(
+                record,
+                (
+                    "reference",
+                    "referenceNumber",
+                    "reference_number",
+                    "noticeReference",
+                    "noticeNumber",
+                    "refNo",
+                    "referenceNo",
+                ),
+            )
+            if not reference_no:
+                continue
+
+            description = _extract_ungm_field(
+                record,
+                ("description", "summary", "shortDescription"),
+            ) or ""
+
+            published_raw = _extract_ungm_field(
+                record,
+                ("published", "publishedDate", "datePublished", "publicationDate"),
+            )
+            deadline_raw = _extract_ungm_field(
+                record,
+                ("deadline", "deadlineDate", "submissionDeadline", "dateDeadline"),
+            )
+            agency = _extract_ungm_field(
+                record,
+                ("agency", "agencyName", "organisation", "organization", "buyer"),
+            ) or ""
+            notice_type = _extract_ungm_field(
+                record,
+                ("noticeType", "noticeTypeName", "type"),
+            ) or ""
+            country = _extract_ungm_field(
+                record,
+                ("country", "countryName", "location"),
+            ) or ""
+            detail_url = _extract_ungm_field(
+                record,
+                ("detailUrl", "noticeUrl", "url", "detailLink"),
+            )
+            if detail_url and detail_url.startswith("/"):
+                detail_url = f"https://www.ungm.org{detail_url}"
+
+            pub_date = _parse_ungm_date(published_raw)
+            dead_date = _parse_ungm_date(deadline_raw)
+
+            tender_data = {
+                "site": "UNGM",
+                "reference_no": reference_no,
+                "title": title,
+                "description": description,
+                "published_date": pub_date,
+                "deadline_date": dead_date,
+                "organization": agency,
+                "notice_type": notice_type,
+                "country": country,
+                "detail_url": detail_url,
+            }
+
+            if self.save_to_db(tender_data):
+                count += 1
+
+        return count
+
+    def _should_retry_ted_without_fields(self, error: TedHTTPError) -> Optional[str]:
+        """Return the error message when a TED field projection should be retried."""
+
+        if not isinstance(error, TedHTTPError):
+            return None
+        if error.status_code != 400:
+            return None
+
+        message = ""
+        if isinstance(error.payload, dict):
+            message = str(
+                error.payload.get("message")
+                or error.payload.get("error")
+                or error.payload.get("detail")
+                or ""
+            )
+        if not message:
+            message = str(error)
+
+        if "unsupported" in message.lower() and "field" in message.lower():
+            return message
+        return None
+
     def get_search_config(self, site: str) -> str:
         """검색 설정 조회"""
         config = session.query(SearchConfig).filter_by(site=site).first()
@@ -522,10 +858,9 @@ class TenderCrawler:
         app.logger.info("Starting UNGM crawling...")
 
         if BeautifulSoup is None:
-            app.logger.error(
-                "UNGM crawling failed: BeautifulSoup is required but not installed"
+            app.logger.warning(
+                "BeautifulSoup is not available; UNGM HTML responses may not be parsed"
             )
-            return 0
 
         # 날짜 설정 (어제부터 오늘까지)
         today = datetime.utcnow().strftime("%d-%b-%Y")
@@ -563,125 +898,136 @@ class TenderCrawler:
                 keywords = [token.lower() for token in tokens]
 
         try:
-            verification_token: Optional[str] = None
-            verification_cookie: Optional[str] = None
-
-            for bootstrap_url in (referer_url, url):
-                bootstrap_response = self.session.get(bootstrap_url, timeout=30)
-                bootstrap_response.raise_for_status()
-                form_token, cookie_token = self._extract_ungm_tokens(
-                    bootstrap_response
-                )
-                if form_token and not verification_token:
-                    verification_token = form_token
-                if cookie_token and not verification_cookie:
-                    verification_cookie = cookie_token
-                if verification_token and verification_cookie:
-                    break
-
-            if not verification_token:
-                app.logger.error(
-                    "UNGM crawling failed: unable to locate verification token"
-                )
-                return 0
-
-            request_headers = {
-                "Referer": referer_url,
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": "https://www.ungm.org",
-                "Accept": "text/html, */*; q=0.01",
-                "Content-Type": "application/json; charset=UTF-8",
-            }
-            if verification_cookie:
-                request_headers["RequestVerificationToken"] = (
-                    f"{verification_cookie}:{verification_token}"
-                )
-            else:
-                request_headers["RequestVerificationToken"] = verification_token
-            request_payload = dict(payload)
-            request_payload["__RequestVerificationToken"] = verification_token
-
-            response = self.session.post(
-                url,
-                json=request_payload,
-                headers=request_headers,
-                timeout=30,
+            verification_token, verification_cookie = self._bootstrap_ungm_tokens(
+                referer_url, url
             )
-            response.raise_for_status()
-
-            # BeautifulSoup으로 파싱 (기본 HTML 파서 사용)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            rows = soup.select('.tableRow')
-
-            count = 0
-
-            for row in rows:
-                cells = [cell.get_text(strip=True) for cell in row.select('.tableCell')]
-                if len(cells) < 8:
-                    continue
-                
-                title = cells[1]
-                deadline = cells[2]
-                published_date = cells[3]
-                agency = cells[4]
-                notice_type = cells[5]
-                reference_no = cells[6]
-                country = cells[7]
-                
-                # 키워드 필터링
-                if keywords:
-                    title_lower = title.lower()
-                    if not any(keyword in title_lower for keyword in keywords):
-                        continue
-                
-                # 날짜 파싱
-                try:
-                    pub_date = datetime.strptime(published_date, "%d-%b-%Y") if published_date else None
-                except:
-                    pub_date = None
-                
-                try:
-                    dead_date = datetime.strptime(deadline.split()[0], "%d-%b-%Y") if deadline else None
-                except:
-                    dead_date = None
-                
-                # 상세 URL 추출
-                detail_url = None
-                link = row.select_one('a')
-                if link and link.get('href'):
-                    detail_url = f"https://www.ungm.org{link['href']}"
-                
-                tender_data = {
-                    "site": "UNGM",
-                    "reference_no": reference_no,
-                    "title": title,
-                    "description": "",
-                    "published_date": pub_date,
-                    "deadline_date": dead_date,
-                    "organization": agency,
-                    "notice_type": notice_type,
-                    "country": country,
-                    "detail_url": detail_url
-                }
-                
-                if self.save_to_db(tender_data):
-                    count += 1
-
-            app.logger.info(f"UNGM crawling completed: {count} tenders processed")
-            return count
-
-        except requests.HTTPError as exc:
-            detail = ""
-            if exc.response is not None:
-                detail = f" - {exc.response.text[:200]}"
-            app.logger.error(f"UNGM crawling failed: {exc}{detail}")
-            return 0
         except requests.RequestException as exc:
             app.logger.error(f"UNGM crawling failed: {exc}")
             return 0
         except Exception as exc:
             app.logger.error(f"UNGM crawling failed: {exc}")
             return 0
+
+        try:
+            response = self._post_ungm_search(
+                url,
+                referer_url,
+                payload,
+                verification_token,
+                verification_cookie,
+            )
+        except requests.HTTPError as exc:
+            response = exc.response
+            should_retry = False
+            if response is not None and response.status_code == 404:
+                body_preview = (response.text or "")[:200]
+                if "FileNotFound" in response.url or "FileNotFound" in body_preview:
+                    should_retry = True
+            if should_retry:
+                app.logger.warning(
+                    "UNGM search returned a FileNotFound page, refreshing verification token and retrying",
+                    extra={"status": response.status_code if response else None},
+                )
+                try:
+                    verification_token, verification_cookie = self._bootstrap_ungm_tokens(
+                        referer_url, url
+                    )
+                    response = self._post_ungm_search(
+                        url,
+                        referer_url,
+                        payload,
+                        verification_token,
+                        verification_cookie,
+                    )
+                except Exception as retry_exc:
+                    detail = ""
+                    if isinstance(retry_exc, requests.HTTPError) and retry_exc.response is not None:
+                        detail = f" - {retry_exc.response.text[:200]}"
+                    app.logger.error(
+                        f"UNGM crawling failed after retry: {retry_exc}{detail}"
+                    )
+                    return 0
+            else:
+                detail = ""
+                if response is not None:
+                    detail = f" - {response.text[:200]}"
+                app.logger.error(f"UNGM crawling failed: {exc}{detail}")
+                return 0
+        except requests.RequestException as exc:
+            app.logger.error(f"UNGM crawling failed: {exc}")
+            return 0
+
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        body_preview = (response.text or "").lstrip()
+        if "application/json" in content_type or body_preview.startswith("{") or body_preview.startswith("["):
+            try:
+                json_payload = response.json()
+            except ValueError as exc:
+                app.logger.error(
+                    f"UNGM crawling failed: invalid JSON response - {exc}"
+                )
+                return 0
+            count = self._process_ungm_json(json_payload, keywords)
+            app.logger.info(
+                f"UNGM crawling completed: {count} tenders processed (JSON response)"
+            )
+            return count
+
+        if BeautifulSoup is None:
+            app.logger.error(
+                "UNGM crawling failed: BeautifulSoup is required to parse HTML responses"
+            )
+            return 0
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        rows = soup.select('.tableRow')
+
+        count = 0
+
+        for row in rows:
+            cells = [cell.get_text(strip=True) for cell in row.select('.tableCell')]
+            if len(cells) < 8:
+                continue
+
+            title = cells[1]
+            deadline = cells[2]
+            published_date = cells[3]
+            agency = cells[4]
+            notice_type = cells[5]
+            reference_no = cells[6]
+            country = cells[7]
+
+            if keywords:
+                title_lower = title.lower()
+                if not any(keyword in title_lower for keyword in keywords):
+                    continue
+
+            pub_date = _parse_ungm_date(published_date)
+            dead_date = _parse_ungm_date(deadline.split()[0] if deadline else deadline)
+
+            detail_url = None
+            link = row.select_one('a')
+            if link and link.get('href'):
+                detail_url = f"https://www.ungm.org{link['href']}"
+
+            tender_data = {
+                "site": "UNGM",
+                "reference_no": reference_no,
+                "title": title,
+                "description": "",
+                "published_date": pub_date,
+                "deadline_date": dead_date,
+                "organization": agency,
+                "notice_type": notice_type,
+                "country": country,
+                "detail_url": detail_url,
+            }
+
+            if self.save_to_db(tender_data):
+                count += 1
+
+        app.logger.info(f"UNGM crawling completed: {count} tenders processed")
+        return count
 
     def crawl_sam(self) -> int:
         """SAM.gov API를 통해 입찰 정보를 수집"""
@@ -745,8 +1091,22 @@ class TenderCrawler:
             try:
                 response = self.session.get(base_url, params=params, timeout=30)
                 response.raise_for_status()
+            except requests.HTTPError as exc:
+                masked = _mask_api_key(str(exc))
+                detail = ""
+                if exc.response is not None:
+                    try:
+                        detail_payload = json.dumps(exc.response.json())[:200]
+                    except ValueError:
+                        detail_payload = (exc.response.text or "")[:200]
+                    if detail_payload:
+                        detail = f" - {detail_payload}"
+                app.logger.error(f"SAM.gov crawling failed: {masked}{detail}")
+                return total_saved
             except requests.RequestException as exc:
-                app.logger.error(f"SAM.gov crawling failed: {exc}")
+                app.logger.error(
+                    f"SAM.gov crawling failed: {_mask_api_key(str(exc))}"
+                )
                 return total_saved
 
             try:
@@ -862,9 +1222,11 @@ class TenderCrawler:
 
         ted_settings = self.get_ted_settings()
         search_query = ted_settings.get("query") or _default_ted_query()
-        fields = ted_settings.get("fields") or list(DEFAULT_TED_FIELDS)
-        if not isinstance(fields, list):
-            fields = list(DEFAULT_TED_FIELDS)
+        fields_config = ted_settings.get("fields")
+        if isinstance(fields_config, list):
+            fields_source = fields_config
+        else:
+            fields_source = list(DEFAULT_TED_FIELDS)
         limit = ted_settings.get("limit", 100)
         sort_field = ted_settings.get("sort_field", "publication-date")
         sort_order = ted_settings.get("sort_order", "DESC")
@@ -886,9 +1248,22 @@ class TenderCrawler:
 
         sort_order_value = str(sort_order).lower() if sort_order else "desc"
 
-        field_tokens = [str(field).strip() for field in fields if str(field).strip()]
+        field_tokens: List[str] = []
+        seen_fields: set[str] = set()
+        for raw_field in fields_source:
+            field_name = str(raw_field).strip()
+            if not field_name:
+                continue
+            normalised = field_name.replace(".", "-")
+            if normalised not in seen_fields:
+                field_tokens.append(normalised)
+                seen_fields.add(normalised)
         if not field_tokens:
-            field_tokens = list(DEFAULT_TED_FIELDS)
+            for default_field in DEFAULT_TED_FIELDS:
+                cleaned = str(default_field).strip().replace(".", "-")
+                if cleaned and cleaned not in seen_fields:
+                    field_tokens.append(cleaned)
+                    seen_fields.add(cleaned)
 
         mode_raw = ted_settings.get("mode")
         try:
@@ -898,7 +1273,7 @@ class TenderCrawler:
         if mode_value not in {"page", "iteration"}:
             mode_value = "page"
 
-        fields_log = ",".join(field_tokens)
+        fields_log = ",".join(field_tokens) if field_tokens else "(default)"
         app.logger.info(
             "Prepared TED search parameters",
             extra={
@@ -911,16 +1286,16 @@ class TenderCrawler:
             },
         )
 
-        try:
+        def _execute_ted_search(
+            active_fields: Optional[List[str]],
+        ) -> Iterator[Any]:
+            fields_label = ",".join(active_fields) if active_fields else "(default)"
             search_kwargs = {
                 "q": search_query,
-                "fields": field_tokens,
+                "fields": active_fields,
                 "sort_field": sort_field,
                 "sort_order": sort_order_value,
             }
-
-            notice_iterable = None
-            page_result = None
 
             if mode_value == "iteration":
                 app.logger.info(
@@ -929,38 +1304,58 @@ class TenderCrawler:
                         "batch_limit": limit_value,
                         "sort": sort_field,
                         "order": sort_order_value,
+                        "fields": fields_label,
                     },
                 )
-                notice_iterable = ted_iterate_all(
+                return ted_iterate_all(
                     batch_limit=limit_value,
                     **search_kwargs,
                 )
-            else:
-                app.logger.info(
-                    "Requesting TED page",
-                    extra={
-                        "page": page_value,
-                        "limit": limit_value,
-                        "sort": sort_field,
-                        "order": sort_order_value,
-                    },
-                )
-                page_result = ted_search_once(
-                    page=page_value,
-                    limit=limit_value,
-                    **search_kwargs,
-                )
-                app.logger.info(
-                    "Received TED page",
-                    extra={
-                        "page": page_result.page,
-                        "count": page_result.count,
-                        "total": page_result.total,
-                        "has_next": bool(page_result.next_page_token),
-                    },
-                )
-                notice_iterable = iter(page_result.notices)
 
+            app.logger.info(
+                "Requesting TED page",
+                extra={
+                    "page": page_value,
+                    "limit": limit_value,
+                    "sort": sort_field,
+                    "order": sort_order_value,
+                    "fields": fields_label,
+                },
+            )
+            page_result_local = ted_search_once(
+                page=page_value,
+                limit=limit_value,
+                **search_kwargs,
+            )
+            app.logger.info(
+                "Received TED page",
+                extra={
+                    "page": page_result_local.page,
+                    "count": page_result_local.count,
+                    "total": page_result_local.total,
+                    "has_next": bool(page_result_local.next_page_token),
+                    "fields": fields_label,
+                },
+            )
+            return iter(page_result_local.notices)
+
+        try:
+            notice_iterable = _execute_ted_search(field_tokens)
+        except TedHTTPError as exc:
+            retry_message = self._should_retry_ted_without_fields(exc)
+            if retry_message:
+                app.logger.warning(
+                    "TED API rejected field projection, retrying without explicit fields",
+                    extra={
+                        "fields": fields_log,
+                        "error": retry_message[:180],
+                    },
+                )
+                notice_iterable = _execute_ted_search([])
+            else:
+                raise
+
+        try:
             count = 0
 
             for notice_obj in notice_iterable:
@@ -990,6 +1385,8 @@ class TenderCrawler:
                     notice.get("buyerCountry")
                     or notice.get("buyer-country")
                     or notice.get("place-of-performance.country")
+                    or notice.get("place-of-performance-country")
+                    or notice.get("placeOfPerformanceCountry")
                     or ""
                 )
                 buyer_name = (
