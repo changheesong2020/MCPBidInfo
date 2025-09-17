@@ -47,25 +47,87 @@
                 placeholder="예: PCR,reagent,diagnostic">
             <small>쉼표 또는 줄바꿈으로 여러 키워드를 입력하세요. 제목에 해당 키워드가 포함된 공고만 수집됩니다.</small>
         </div>
-        <!-- add other UNGM fields if needed -->
+        <div class="form-group" style="margin-top: 1rem;">
+            <label for="ungm_url_preview">UNGM 요청 URL</label>
+            <textarea id="ungm_url_preview" name="ungm_url_preview" rows="3" readonly>{{ ungm_url_preview | default('https://www.ungm.org/Public/Notice/Search') }}</textarea>
+            <small>UNGM 검색에 사용되는 POST 요청 URL입니다.</small>
+        </div>
     </div>
 
     <div class="form-section">
         <h3>TED 검색 빌더</h3>
         <div class="form-grid" style="margin-top: 1rem;">
             <div class="form-group">
+                <label for="ted_date_from">게시일 (시작)</label>
+                <input type="date" id="ted_date_from" name="ted_date_from" value="{{ ted_date_from }}">
+            </div>
+            <div class="form-group">
+                <label for="ted_date_to">게시일 (종료)</label>
+                <input type="date" id="ted_date_to" name="ted_date_to" value="{{ ted_date_to }}">
+            </div>
+            <div class="form-group">
                 <label for="ted_keywords">제목 키워드</label>
                 <input type="text" id="ted_keywords" name="ted_keywords" value="{{ ted_keywords }}" placeholder="예: PCR,reagent,diagnostic">
                 <small>문구 검색은 공백을 포함한 단어를 그대로 입력하세요. 쉼표 또는 줄바꿈으로 여러 키워드를 구분합니다.</small>
             </div>
-            <!-- add other TED fields if needed -->
+            <div class="form-group">
+                <label for="ted_countries">국가 코드</label>
+                <input type="text" id="ted_countries" name="ted_countries" value="{{ ted_countries }}" placeholder="예: US,GB,DE">
+                <small>ISO alpha-2 국가 코드를 입력하세요. 쉼표로 구분합니다.</small>
+            </div>
+            <div class="form-group">
+                <label for="ted_cpv">CPV 코드</label>
+                <input type="text" id="ted_cpv" name="ted_cpv" value="{{ ted_cpv }}" placeholder="예: 33140000,33190000">
+                <small>Common Procurement Vocabulary 코드를 입력하세요. 쉼표로 구분합니다.</small>
+            </div>
+            <div class="form-group">
+                <label for="ted_form_types">양식 유형</label>
+                <input type="text" id="ted_form_types" name="ted_form_types" value="{{ ted_form_types }}" placeholder="예: CN,PIN">
+                <small>eForms 양식 유형을 입력하세요. 쉼표로 구분합니다.</small>
+            </div>
+            <div class="form-group">
+                <label for="ted_fields_text">반환 필드</label>
+                <textarea id="ted_fields_text" name="ted_fields" rows="4" placeholder="기본 필드가 사용됩니다">{{ ted_fields_text }}</textarea>
+                <small>반환받을 필드를 한 줄에 하나씩 입력하세요. 비워두면 기본 필드가 사용됩니다.</small>
+            </div>
+            <div class="form-group">
+                <label for="ted_limit">페이지당 결과 수</label>
+                <input type="number" id="ted_limit" name="ted_limit" min="1" max="250" value="{{ ted_limit }}">
+            </div>
+            <div class="form-group">
+                <label for="ted_page">페이지 번호</label>
+                <input type="number" id="ted_page" name="ted_page" min="1" value="{{ ted_page }}">
+            </div>
+            <div class="form-group">
+                <label for="ted_sort_field">정렬 필드</label>
+                <input type="text" id="ted_sort_field" name="ted_sort_field" value="{{ ted_sort_field }}" placeholder="publication-date">
+                <small>정렬할 필드명을 입력하세요 (예: publication-date, title)</small>
+            </div>
             <div class="form-group">
                 <label for="ted_sort_order">정렬 순서</label>
                 <select id="ted_sort_order" name="ted_sort_order">
-                    <option value="DESC" {% if ted_sort_order == 'DESC' %}selected{% endif %}>DESC</option>
-                    <option value="ASC" {% if ted_sort_order == 'ASC' %}selected{% endif %}>ASC</option>
+                    <option value="DESC" {% if ted_sort_order == 'DESC' %}selected{% endif %}>DESC (내림차순)</option>
+                    <option value="ASC" {% if ted_sort_order == 'ASC' %}selected{% endif %}>ASC (오름차순)</option>
                 </select>
             </div>
+            <div class="form-group">
+                <label for="ted_mode">검색 모드</label>
+                <select id="ted_mode" name="ted_mode">
+                    <option value="page" {% if ted_mode == 'page' %}selected{% endif %}>페이지 모드</option>
+                    <option value="iteration" {% if ted_mode == 'iteration' %}selected{% endif %}>반복 모드</option>
+                </select>
+                <small>페이지 모드는 특정 페이지를, 반복 모드는 모든 결과를 가져옵니다.</small>
+            </div>
+        </div>
+        <div class="form-group" style="margin-top: 1rem;">
+            <label for="ted_query_preview">생성된 쿼리 (미리보기)</label>
+            <textarea id="ted_query_preview" name="ted_query_preview" rows="3" readonly>{{ ted_query_preview }}</textarea>
+            <small>위 설정을 기반으로 자동 생성된 TED API 쿼리입니다.</small>
+        </div>
+        <div class="form-group" style="margin-top: 1rem;">
+            <label for="ted_url_preview">TED API 요청 URL (전체)</label>
+            <textarea id="ted_url_preview" name="ted_url_preview" rows="4" readonly>{{ ted_url_preview | default('https://api.ted.europa.eu/v3/notices/search') }}</textarea>
+            <small>실제 TED API 호출 시 사용되는 완전한 URL입니다.</small>
         </div>
     </div>
 
@@ -111,6 +173,11 @@
                 <label for="sam_sort">정렬 필드</label>
                 <input type="text" id="sam_sort" name="sam_sort" value="{{ sam_sort }}" placeholder="예: -modifiedDate">
             </div>
+        </div>
+        <div class="form-group" style="margin-top: 1rem;">
+            <label for="sam_url_preview">SAM.gov API 요청 URL (전체)</label>
+            <textarea id="sam_url_preview" name="sam_url_preview" rows="4" readonly>{{ sam_url_preview | default('https://api.sam.gov/prod/opportunities/v1/search') }}</textarea>
+            <small>실제 SAM.gov API 호출 시 사용되는 완전한 URL입니다. API 키는 보안상 ***로 마스킹됩니다.</small>
         </div>
     </div>
     <button type="submit" class="btn">설정 저장</button>
