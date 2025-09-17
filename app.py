@@ -597,8 +597,27 @@ class TenderCrawler:
         verification_cookie: Optional[str] = None
 
         for bootstrap_url in (referer_url, search_url):
-            bootstrap_response = self.session.get(bootstrap_url, timeout=30)
-            bootstrap_response.raise_for_status()
+            try:
+                bootstrap_response = self.session.get(bootstrap_url, timeout=30)
+                bootstrap_response.raise_for_status()
+            except requests.HTTPError as exc:
+                response = getattr(exc, "response", None)
+                should_skip = False
+                if response is not None and response.status_code == 404:
+                    preview = _preview_text(getattr(response, "text", ""))
+                    target_url = getattr(response, "url", "") or ""
+                    if "FileNotFound" in target_url or "FileNotFound" in preview:
+                        should_skip = True
+                if should_skip:
+                    app.logger.debug(
+                        "Skipping UNGM bootstrap URL that returned FileNotFound",
+                        extra={
+                            "url": bootstrap_url,
+                            "status": response.status_code if response else None,
+                        },
+                    )
+                    continue
+                raise
             form_token, cookie_token = self._extract_ungm_tokens(bootstrap_response)
             if form_token and not verification_token:
                 verification_token = form_token
